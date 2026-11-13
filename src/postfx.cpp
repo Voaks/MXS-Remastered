@@ -1186,6 +1186,26 @@ void SetupShadowFrame()
 }
 
 // ---- The headlight: on the bike's front plate ----------------------------------------------
+// The rainbow headlight's colour now (Config::headlightColor 2): every hue in turn, once round
+// every kRainbowSeconds, at full brightness (its strongest channel 1) with a little white in it, so
+// even the blue and the purple still light the track.
+constexpr double kRainbowSeconds = 4.0;
+Vec3 RainbowColor(double seconds)
+{
+    const double h = std::fmod(seconds / kRainbowSeconds, 1.0) * 6.0;
+    const double x = 1.0 - std::fabs(std::fmod(h, 2.0) - 1.0);
+    Vec3 c;
+    switch (static_cast<int>(h)) {
+    case 0:  c = { 1, x, 0 }; break;
+    case 1:  c = { x, 1, 0 }; break;
+    case 2:  c = { 0, 1, x }; break;
+    case 3:  c = { 0, x, 1 }; break;
+    case 4:  c = { x, 0, 1 }; break;
+    default: c = { 1, 0, x }; break;
+    }
+    constexpr double kWhite = 0.12;
+    return { kWhite + (1.0 - kWhite) * c.x, kWhite + (1.0 - kWhite) * c.y, kWhite + (1.0 - kWhite) * c.z };
+}
 Vec3 TransformPoint(const double m[16], Vec3 p)
 {
     return { m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12], m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13],
@@ -5245,6 +5265,16 @@ void Render(int w, int h)
                            static_cast<float>((kBottomDeg + topDeg) * 0.5 * kDegToRad),
                            static_cast<float>((kBottomDeg - topDeg) * 0.5 * kDegToRad));
             g_gl.Uniform1f(p["u_headReach"], static_cast<float>(Clamp(1.0 + cfg.headlightAimDeg / 15.0, 0.6, 2.0)));
+            // White a touch warm (a halogen-like LED); amber, the deep orange-yellow of an amber
+            // off-road lamp (its red full, its blue nearly gone); or rainbow, every hue in turn.
+            if (cfg.headlightColor == 1) {
+                g_gl.Uniform3f(p["u_headColor"], 1.0f, 0.63f, 0.16f);
+            } else if (cfg.headlightColor == 2) {
+                const Vec3 c = RainbowColor(Seconds());
+                g_gl.Uniform3f(p["u_headColor"], static_cast<float>(c.x), static_cast<float>(c.y), static_cast<float>(c.z));
+            } else {
+                g_gl.Uniform3f(p["u_headColor"], 1.0f, 0.97f, 0.92f);
+            }
         }
         // Tire marks: where the map's window is, from the camera, in its own texels.
         Bind(p, "u_markMap", 6, marksOn ? g_res.marks.tex : 0);

@@ -223,6 +223,7 @@ uniform vec3  u_headRight[12];  // view space: the beam's own right and up (acro
 uniform vec3  u_headUp[12];
 uniform float u_headPower[12];  // each one's strength (0..1: fading in and out as bikes are found and lost)
 uniform vec3  u_headBeam;       // radians: the beam's half-width, the middle of it below level, its half-height
+uniform vec3  u_headColor;      // the light's colour (white or amber, Config::headlightAmber)
 uniform float u_headReach;      // how far it reaches (1 = level; more aimed up, less aimed down)
 uniform float u_snow;           // WEATHER: 0..1 snow on the ground and an overcast sky (0: no weather)
 uniform float u_snowfall;       // 0..1 how heavily it falls: the haze in the distance
@@ -323,7 +324,7 @@ vec3 Headlight(vec3 albedo, vec3 p, vec3 n)
     float sum = 0.0;
     for (int i = 0; i < u_headCount; ++i)
         sum += HeadlightOne(p, n, i) * u_headPower[i];
-    return albedo * vec3(1.0, 0.97, 0.92) * (sum * u_headlight * 2.6);
+    return albedo * u_headColor * (sum * u_headlight * 2.6);
 }
 
 float Hash13(vec3 p)

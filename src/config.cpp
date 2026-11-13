@@ -376,6 +376,7 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Graphics",  L"MarkDepth",            c.markDepth },
         { L"Graphics",  L"MarksEveryBike",       c.marksEveryBike ? 1.0 : 0.0 },
         { L"Graphics",  L"HeadlightEveryBike",   c.headlightEveryBike ? 1.0 : 0.0 },
+        { L"Graphics",  L"HeadlightColor",       static_cast<double>(c.headlightColor) },
         { L"Graphics",  L"TireDirt",             c.tireDirt },
         { L"Graphics",  L"MotionBlur",           c.motionBlur },
         { L"Graphics",  L"DepthOfField",         c.depthOfField },
@@ -572,6 +573,7 @@ void CopyTunables(const Config& from, Config& to)
     to.markDepth            = from.markDepth;
     to.marksEveryBike       = from.marksEveryBike;
     to.headlightEveryBike   = from.headlightEveryBike;
+    to.headlightColor       = from.headlightColor;
     to.snow                 = from.snow;
     to.snowfall             = from.snowfall;
     to.snowWind             = from.snowWind;
@@ -841,6 +843,7 @@ Config ParseConfig(const Config& base)
     c.markDepth        = ReadDouble(L"Graphics", L"MarkDepth", c.markDepth);
     c.marksEveryBike   = ReadInt(L"Graphics", L"MarksEveryBike", c.marksEveryBike) != 0;
     c.headlightEveryBike = ReadInt(L"Graphics", L"HeadlightEveryBike", c.headlightEveryBike) != 0;
+    c.headlightColor   = Clamp(ReadInt(L"Graphics", L"HeadlightColor", c.headlightColor), 0, 2);
     c.snow             = ReadDouble(L"Weather", L"Snow", c.snow ? 1.0 : 0.0) > 0.0;  // (any amount it was a slider for: on)
     c.snowfall         = Clamp(ReadDouble(L"Weather", L"Snowfall", c.snowfall), 0.0, 1.0);
     c.snowWind         = Clamp(ReadDouble(L"Weather", L"Wind", c.snowWind), 0.0, 1.0);

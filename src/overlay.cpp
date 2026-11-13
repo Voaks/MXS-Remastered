@@ -1446,6 +1446,9 @@ const RowDef kRows[] = {
     Slider(kTabGraphics, "HEADLIGHT",       "Headlight",            &Config::headlight,        0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
         .Help("A headlight on your bike's front plate that lights the track ahead when the time of "
               "day makes it dark. It turns with the bike, not your head."),
+    Choice3(kTabGraphics, nullptr,          "Color",                &Config::headlightColor, "WHITE", "AMBER", "RAINBOW")
+        .Help("The headlight's colour: white, amber like an off-road light or a rally lamp, or rainbow - "
+              "slowly going round every colour, like an RGB light. Every bike's headlight is the same."),
     Slider(kTabGraphics, nullptr,           "Beam width",           &Config::headlightBeamDeg, 10.0,  90.0,  1.0,    2.0,    0, "\xB0")
         .Help("How far the headlight's beam spreads to the sides. It always lights the ground from "
               "just in front of the plate out, narrower only makes it skinnier."),
@@ -2473,7 +2476,7 @@ bool RowInactive(const RowDef& def, const Config& cfg)
         if (def.number == &Config::headlight)
             return cfg.timeOfDay < 0;
         if (def.number == &Config::headlightBeamDeg || def.number == &Config::headlightAimDeg ||
-            def.flag == &Config::headlightEveryBike)
+            def.flag == &Config::headlightEveryBike || def.option == &Config::headlightColor)
             return cfg.timeOfDay < 0 || cfg.headlight <= 0;
         if (def.number == &Config::snowfall)
             return !cfg.snow;

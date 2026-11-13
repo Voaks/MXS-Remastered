@@ -139,6 +139,7 @@ struct Config {
                                           // dirt) and an overcast sky; off = no weather
     double snowfall         = 0.5;        // 0..1 how heavily it falls (flakes around you, and the haze they make)
     double snowWind         = 0.2;        // 0..1 how hard the wind blows the falling snow
+    int    headlightColor   = 0;          // the headlight's colour (every bike's): 0 white, 1 amber, 2 rainbow
     bool   headlightEveryBike = true;     // a headlight on every bike around you too, not just yours (found
                                           // by their wheels: lobby_wheels.h)
     double ambientOcclusion = 0.5;        // 0..1

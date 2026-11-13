@@ -295,12 +295,14 @@ int main(int argc, char** argv)
     else if (mode == "offscreen" || stadium || hillTree)  // shadow maps alone (the screen-space ones as short as they go)
         settings = base.replace(base.find("Shadows=0"), 9, "Shadows=1\nShadowMap=1\nShadowLength=1");
     else if (mode == "headlight" || mode == "narrowbeam" || mode == "thirdperson" || mode == "headlightup" ||
-             mode == "headlightdown") {
+             mode == "headlightdown" || mode == "headlightamber" || mode == "headlightrainbow") {
         base.replace(base.find("TimeOfDay=-1"), 12, "TimeOfDay=0");
         settings = base.replace(base.find("Headlight=0"), 11,
                                 mode == "narrowbeam"      ? "Headlight=1\nHeadlightBeamDeg=8"
                                 : mode == "headlightup"   ? "Headlight=1\nHeadlightBeamDeg=22\nHeadlightAimDeg=15"
                                 : mode == "headlightdown" ? "Headlight=1\nHeadlightBeamDeg=22\nHeadlightAimDeg=-20"
+                                : mode == "headlightamber" ? "Headlight=1\nHeadlightBeamDeg=22\nHeadlightColor=1"
+                                : mode == "headlightrainbow" ? "Headlight=1\nHeadlightBeamDeg=22\nHeadlightColor=2"
                                                           : "Headlight=1\nHeadlightBeamDeg=22");
     }
     else if (mode == "shadowperf" || mode == "shadowperf0")  // timing: 800 objects cast shadow-map shadows
@@ -1235,7 +1237,8 @@ int main(int argc, char** argv)
     {
         const Pixel flarePixel = At(flareX, 130), beside = At(flareX - 45, 130);
         const bool timeOfDay = mode == "night" || mode == "headlight" || mode == "narrowbeam" || mode == "thirdperson" ||
-                               mode == "headlightup" || mode == "headlightdown";
+                               mode == "headlightup" || mode == "headlightdown" || mode == "headlightamber" ||
+                               mode == "headlightrainbow";
         printf("    lens flare %d %d %d, beside it %d %d %d\n", flarePixel.r, flarePixel.g, flarePixel.b, beside.r, beside.g, beside.b);
         if (timeOfDay)
             Check(Near(flarePixel, beside, 6), "the game's lens flare is hidden under a time of day of our own");
@@ -1404,13 +1407,21 @@ int main(int argc, char** argv)
             Check(At(W / 2, 360).r < 60, "aimed down, it doesn't reach as far");
             Check(At(W / 2, 480).r > 90, "and still lights the ground right in front of the bike");
         }
-    } else if (mode == "headlight") {
+    } else if (mode == "headlight" || mode == "headlightamber" || mode == "headlightrainbow") {
         const Pixel pool = At(W / 2, 330), side = At(30, 330), corner = At(W - 20, H - 20);
         printf("    headlight pool %d %d %d, beside it %d %d %d, corner %d %d %d\n", pool.r, pool.g, pool.b, side.r, side.g,
                side.b, corner.r, corner.g, corner.b);
-        Check(pool.r > 90 && pool.r > side.r * 2, "the headlight lights the ground ahead");
+        // (The rainbow's colour depends on the moment: its brightest channel is what lights.)
+        const int brightest = pool.r > pool.g ? (pool.r > pool.b ? pool.r : pool.b) : (pool.g > pool.b ? pool.g : pool.b);
+        Check((mode == "headlightrainbow" ? brightest : pool.r) > 90 && pool.r + pool.g + pool.b > (side.r + side.g + side.b) * 2,
+              "the headlight lights the ground ahead");
         Check(side.r < 45 && corner.r < 45, "outside the beam it stays night");
         Check(sky.r < 40, "the headlight doesn't light the sky");
+        // (The ground's own colour is brownish: lit white it reads about 151 119 88.)
+        if (mode == "headlightamber")
+            Check(pool.b * 10 < pool.r * 3 && pool.g * 10 < pool.r * 7, "an amber headlight lights it amber (blue and green well under red)");
+        else if (mode == "headlight")
+            Check(pool.b * 2 > pool.r && pool.g * 10 > pool.r * 7, "a white one lights it as it is (not amber)");
     } else if (mode == "narrowbeam") {
         // A narrow beam is skinnier, but still lights the ground from the plate out.
         const Pixel ahead = At(W / 2, 330), closeBy = At(W / 2, H - 40), aside = At(W / 2 + 110, 330);
