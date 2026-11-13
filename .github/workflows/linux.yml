@@ -1,0 +1,33 @@
+# Builds the Linux version (bin/Linux: libmxs-remastered.so and mxs-remastered.sh) on every push,
+# on GitHub's own Ubuntu machines. The result is on the run's page (Actions tab) to download, as
+# MXS-Remastered-Linux. The Windows build isn't touched: it's built with Visual Studio as before.
+name: Linux build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    # (An older Ubuntu: the library then runs on that glibc and anything newer.)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: bash build_linux.sh
+
+      - name: Check what it shows the game
+        run: |
+          nm -D --defined-only bin/Linux/libmxs-remastered.so | awk '{print $3}' | sort | tr '\n' ' '
+          echo
+          ldd bin/Linux/libmxs-remastered.so
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: MXS-Remastered-Linux
+          path: |
+            bin/Linux/libmxs-remastered.so
+            bin/Linux/mxs-remastered.sh

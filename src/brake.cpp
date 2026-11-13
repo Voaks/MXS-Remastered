@@ -12,7 +12,12 @@
 #include "brake.h"
 
 #include <windows.h>
+#ifdef _WIN32
 #include <mmsystem.h>
+#else
+#include <dlfcn.h>
+#include <thread>
+#endif
 
 #include <atomic>
 #include <cctype>
@@ -26,7 +31,9 @@
 #include "log.h"
 #include "paths.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "winmm.lib")
+#endif
 
 namespace mxcam {
 namespace brake {
@@ -193,7 +200,9 @@ constexpr int kBuffers = 4;     // queued (~46 ms ahead)
 std::atomic<float> g_target{ 0.0f };  // how hard it squeals, 0..1 (from Update)
 std::atomic<float> g_volume{ 0.0f };  // Config::brakeSqueal
 std::atomic<bool>  g_stop{ false };
+#ifdef _WIN32
 HANDLE g_thread = nullptr;
+#endif
 
 struct Synth {
     double   level = 0;              // how loud, following g_target
@@ -247,6 +256,7 @@ struct Synth {
     }
 };
 
+#ifdef _WIN32
 DWORD WINAPI AudioThread(void*)
 {
     WAVEFORMATEX format{};
@@ -311,6 +321,70 @@ void StopAudio()
     CloseHandle(g_thread);
     g_thread = nullptr;
 }
+
+#else
+// Linux: the same through ALSA (the game's own sound library: its functions found at run time),
+// a block at a time, ALSA pacing the thread.
+void AudioThread()
+{
+    using OpenFn = int (*)(void**, const char*, int, int);
+    using SetParamsFn = int (*)(void*, int, int, unsigned, unsigned, int, unsigned);
+    using WriteFn = long (*)(void*, const void*, unsigned long);
+    using RecoverFn = int (*)(void*, int, int);
+    using CloseFn = int (*)(void*);
+    void* lib = dlopen("libasound.so.2", RTLD_NOW | RTLD_NOLOAD);
+    if (!lib)
+        lib = dlopen("libasound.so.2", RTLD_NOW);
+    const auto open = lib ? reinterpret_cast<OpenFn>(dlsym(lib, "snd_pcm_open")) : nullptr;
+    const auto setParams = lib ? reinterpret_cast<SetParamsFn>(dlsym(lib, "snd_pcm_set_params")) : nullptr;
+    const auto write = lib ? reinterpret_cast<WriteFn>(dlsym(lib, "snd_pcm_writei")) : nullptr;
+    const auto recover = lib ? reinterpret_cast<RecoverFn>(dlsym(lib, "snd_pcm_recover")) : nullptr;
+    const auto close = lib ? reinterpret_cast<CloseFn>(dlsym(lib, "snd_pcm_close")) : nullptr;
+    void* pcm = nullptr;
+    // (Playback 0; signed 16-bit little endian 2; interleaved 3; resampled if need be; ~46 ms queued.)
+    if (!open || !setParams || !write || !close || open(&pcm, "default", 0, 0) < 0 ||
+        setParams(pcm, 2, 3, 1, kRate, 1, kBuffers * kBlock * 1000000u / kRate) < 0) {
+        Log("brake squeal: the sound output couldn't be opened (ALSA)");
+        if (pcm && close)
+            close(pcm);
+        return;
+    }
+    Log("brake squeal: sound output open (%d Hz, ALSA)", kRate);
+    static short samples[kBlock];
+    Synth synth;
+    while (!g_stop.load()) {
+        synth.Fill(samples, kBlock, g_target.load(), g_volume.load());
+        long n = write(pcm, samples, kBlock);
+        if (n < 0 && recover)
+            n = recover(pcm, static_cast<int>(n), 1);
+        if (n < 0) {
+            Log("brake squeal: the sound output stopped (ALSA error %ld)", n);
+            break;
+        }
+    }
+    close(pcm);
+    Log("brake squeal: sound output closed");
+}
+
+std::thread g_audio;
+
+void StartAudio()
+{
+    if (g_audio.joinable())
+        return;
+    g_stop = false;
+    g_audio = std::thread(AudioThread);
+}
+
+void StopAudio()
+{
+    if (!g_audio.joinable())
+        return;
+    g_stop = true;
+    g_audio.join();
+}
+
+#endif
 
 // ---- When it squeals ------------------------------------------------------------------------------
 double g_lastNow = -1, g_lastSpeed = 0, g_decel = 0;

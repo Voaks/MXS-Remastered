@@ -25,6 +25,10 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#ifndef _WIN32
+#include <dlfcn.h>
+#include "linux/platform_linux.h"
+#endif
 
 #include "camera.h"
 #include "config.h"
@@ -43,7 +47,16 @@ namespace {
 // decltype(&::glFoo) takes the exact signature and calling convention from <GL/gl.h>
 // without importing the symbol.
 // ===========================================================================
+#ifdef _WIN32
 using PFN_wglSwapBuffers = BOOL(WINAPI*)(HDC);  // exported by opengl32 but not declared in the SDK
+#else
+// Linux: the frame ends at the GLX (X11) or EGL buffer swap; newer functions come through their
+// get-proc-address (the game uses GLX; EGL is covered too).
+using PFN_glXSwapBuffers     = void (*)(void* display, unsigned long drawable);
+using PFN_glXGetProcAddress  = void (*(*)(const GLubyte* name))();
+using PFN_eglSwapBuffers     = unsigned (*)(void* display, void* surface);
+using PFN_eglGetProcAddress  = void (*(*)(const char* name))();
+#endif
 
 decltype(&::glMatrixMode)        real_glMatrixMode        = nullptr;
 decltype(&::glLoadIdentity)      real_glLoadIdentity      = nullptr;
@@ -75,9 +88,17 @@ decltype(&::glBindTexture)       real_glBindTexture       = nullptr;
 decltype(&::glDepthMask)         real_glDepthMask         = nullptr;
 decltype(&::glEnable)            real_glEnable            = nullptr;
 decltype(&::glDisable)           real_glDisable           = nullptr;
+#ifdef _WIN32
 PFN_wglSwapBuffers               real_wglSwapBuffers      = nullptr;
 decltype(&::wglSwapLayerBuffers) real_wglSwapLayerBuffers = nullptr;
 decltype(&::wglGetProcAddress)   real_wglGetProcAddress   = nullptr;
+#else
+PFN_glXSwapBuffers               real_glXSwapBuffers         = nullptr;
+PFN_glXGetProcAddress            real_glXGetProcAddress      = nullptr;
+PFN_glXGetProcAddress            real_glXGetProcAddressARB   = nullptr;
+PFN_eglSwapBuffers               real_eglSwapBuffers         = nullptr;
+PFN_eglGetProcAddress            real_eglGetProcAddress      = nullptr;
+#endif
 
 // ===========================================================================
 // Mirrored GL state
@@ -157,6 +178,7 @@ const char* ModeName(GLenum mode)
 
 bool IsDumping() { return g_frame.dumping && g_frame.dumpLines < kMaxDumpLines; }
 
+#ifdef _WIN32
 bool GameHasFocus()
 {
     DWORD pid = 0;
@@ -174,6 +196,27 @@ void* GetRealGLFunction(const char* name)
     const auto address = reinterpret_cast<INT_PTR>(real_wglGetProcAddress(name));
     return (address >= -1 && address <= 3) ? nullptr : reinterpret_cast<void*>(address);
 }
+#else
+bool GameHasFocus() { return platform::WindowFocused(); }
+
+// The real function: the next library's (libGL's: this one is preloaded ahead of it), or through
+// the real glXGetProcAddress for what libGL doesn't export. The Windows-only names the shared code
+// asks for are given their GLX stand-ins (win32_compat.cpp).
+void* GetRealGLFunction(const char* name)
+{
+    if (strcmp(name, "wglGetCurrentContext") == 0)
+        return reinterpret_cast<void*>(&::wglGetCurrentContext);
+    if (strcmp(name, "wglGetCurrentDC") == 0)
+        return reinterpret_cast<void*>(&::wglGetCurrentDC);
+    if (void* next = dlsym(RTLD_NEXT, name))
+        return next;
+    if (!real_glXGetProcAddressARB)
+        real_glXGetProcAddressARB = reinterpret_cast<PFN_glXGetProcAddress>(dlsym(RTLD_NEXT, "glXGetProcAddressARB"));
+    if (real_glXGetProcAddressARB)
+        return reinterpret_cast<void*>(real_glXGetProcAddressARB(reinterpret_cast<const GLubyte*>(name)));
+    return nullptr;
+}
+#endif
 
 void DumpCall(const char* format, ...)
 {
@@ -638,6 +681,7 @@ void APIENTRY Hook_glDeleteTextures(GLsizei n, const GLuint* textures)
 
 // The shaders run on the finished 3D image (if the HUD start wasn't recognised earlier), then
 // the settings panel is drawn into the frame, right before it is presented.
+#ifdef _WIN32
 BOOL WINAPI Hook_wglSwapBuffers(HDC dc)
 {
     postfx::FrameEnd();
@@ -666,6 +710,50 @@ PROC WINAPI Hook_wglGetProcAddress(LPCSTR name)
     const PROC real = real_wglGetProcAddress(name);
     return reinterpret_cast<PROC>(WrapProc(name, reinterpret_cast<void*>(real)));
 }
+#else
+// The frame's end, as wglSwapBuffers is on Windows: the game's window and display are noted (the
+// menu reads its input and size from them), then the same as there.
+void EndOfFrame()
+{
+    postfx::FrameEnd();
+    OverlayFrame(wglGetCurrentDC());
+    texfilter::FrameEnd();
+    g_lastSwapTick = GetTickCount64();
+    EndFrame();
+}
+
+void Hook_glXSwapBuffers(void* display, unsigned long drawable)
+{
+    platform::NoteGameWindow(display, drawable);
+    EndOfFrame();
+    real_glXSwapBuffers(display, drawable);
+}
+
+unsigned Hook_eglSwapBuffers(void* display, void* surface)
+{
+    EndOfFrame();
+    return real_eglSwapBuffers(display, surface);
+}
+
+// Everything past OpenGL 1.1 (shaders, uniforms, buffers) is fetched through here.
+void (*Hook_glXGetProcAddress(const GLubyte* name))()
+{
+    void (*real)() = real_glXGetProcAddress ? real_glXGetProcAddress(name) : nullptr;
+    return reinterpret_cast<void (*)()>(WrapProc(reinterpret_cast<const char*>(name), reinterpret_cast<void*>(real)));
+}
+
+void (*Hook_glXGetProcAddressARB(const GLubyte* name))()
+{
+    void (*real)() = real_glXGetProcAddressARB ? real_glXGetProcAddressARB(name) : nullptr;
+    return reinterpret_cast<void (*)()>(WrapProc(reinterpret_cast<const char*>(name), reinterpret_cast<void*>(real)));
+}
+
+void (*Hook_eglGetProcAddress(const char* name))()
+{
+    void (*real)() = real_eglGetProcAddress ? real_eglGetProcAddress(name) : nullptr;
+    return reinterpret_cast<void (*)()>(WrapProc(name, reinterpret_cast<void*>(real)));
+}
+#endif
 
 }  // namespace
 
@@ -689,11 +777,121 @@ const HookEntry* GetHookTable(size_t& count)
         MXCAM_HOOK(glTexParameteriv), MXCAM_HOOK(glTexParameterfv),
         MXCAM_HOOK(glDeleteTextures), MXCAM_HOOK(glBindTexture),
         MXCAM_HOOK(glDepthMask),    MXCAM_HOOK(glEnable),      MXCAM_HOOK(glDisable),
+#ifdef _WIN32
         MXCAM_HOOK(wglSwapBuffers), MXCAM_HOOK(wglSwapLayerBuffers),
         MXCAM_HOOK(wglGetProcAddress),
+#else
+        MXCAM_HOOK(glXSwapBuffers), MXCAM_HOOK(glXGetProcAddress), MXCAM_HOOK(glXGetProcAddressARB),
+        MXCAM_HOOK(eglSwapBuffers), MXCAM_HOOK(eglGetProcAddress),
+#endif
     };
     count = _countof(kHooks);
     return kHooks;
 }
 
+#ifndef _WIN32
+// Each hooked function's real one, from the library after this one (libGL, libEGL): set when this
+// library loads (linux/entry_linux.cpp), and again if one is called before then.
+void ResolveRealFunctions()
+{
+    size_t count = 0;
+    const HookEntry* hooks = GetHookTable(count);
+    for (size_t i = 0; i < count; ++i)
+        if (!*hooks[i].realSlot)
+            *hooks[i].realSlot = dlsym(RTLD_NEXT, hooks[i].name);
+}
+#endif
+
 }  // namespace mxcam
+
+#ifndef _WIN32
+// ---- What the game calls (Linux) ------------------------------------------------------------
+// This library is preloaded (LD_PRELOAD) ahead of libGL: the game's calls to these come here,
+// and each goes on to the real one, as the export stubs do on Windows (proxy.cpp).
+#define MXCAM_EXPORT extern "C" __attribute__((visibility("default")))
+#define MXCAM_REAL(fn) (mxcam::real_##fn ? 0 : (mxcam::ResolveRealFunctions(), 0))
+
+MXCAM_EXPORT void glMatrixMode(GLenum mode) { MXCAM_REAL(glMatrixMode); mxcam::Hook_glMatrixMode(mode); }
+MXCAM_EXPORT void glLoadIdentity() { MXCAM_REAL(glLoadIdentity); mxcam::Hook_glLoadIdentity(); }
+MXCAM_EXPORT void glLoadMatrixf(const GLfloat* m) { MXCAM_REAL(glLoadMatrixf); mxcam::Hook_glLoadMatrixf(m); }
+MXCAM_EXPORT void glLoadMatrixd(const GLdouble* m) { MXCAM_REAL(glLoadMatrixd); mxcam::Hook_glLoadMatrixd(m); }
+MXCAM_EXPORT void glMultMatrixf(const GLfloat* m) { MXCAM_REAL(glMultMatrixf); mxcam::Hook_glMultMatrixf(m); }
+MXCAM_EXPORT void glMultMatrixd(const GLdouble* m) { MXCAM_REAL(glMultMatrixd); mxcam::Hook_glMultMatrixd(m); }
+MXCAM_EXPORT void glPushMatrix() { MXCAM_REAL(glPushMatrix); mxcam::Hook_glPushMatrix(); }
+MXCAM_EXPORT void glPopMatrix() { MXCAM_REAL(glPopMatrix); mxcam::Hook_glPopMatrix(); }
+MXCAM_EXPORT void glFrustum(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f)
+{
+    MXCAM_REAL(glFrustum);
+    mxcam::Hook_glFrustum(l, r, b, t, n, f);
+}
+MXCAM_EXPORT void glOrtho(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f)
+{
+    MXCAM_REAL(glOrtho);
+    mxcam::Hook_glOrtho(l, r, b, t, n, f);
+}
+MXCAM_EXPORT void glRotatef(GLfloat a, GLfloat x, GLfloat y, GLfloat z) { MXCAM_REAL(glRotatef); mxcam::Hook_glRotatef(a, x, y, z); }
+MXCAM_EXPORT void glRotated(GLdouble a, GLdouble x, GLdouble y, GLdouble z) { MXCAM_REAL(glRotated); mxcam::Hook_glRotated(a, x, y, z); }
+MXCAM_EXPORT void glTranslatef(GLfloat x, GLfloat y, GLfloat z) { MXCAM_REAL(glTranslatef); mxcam::Hook_glTranslatef(x, y, z); }
+MXCAM_EXPORT void glTranslated(GLdouble x, GLdouble y, GLdouble z) { MXCAM_REAL(glTranslated); mxcam::Hook_glTranslated(x, y, z); }
+MXCAM_EXPORT void glScalef(GLfloat x, GLfloat y, GLfloat z) { MXCAM_REAL(glScalef); mxcam::Hook_glScalef(x, y, z); }
+MXCAM_EXPORT void glScaled(GLdouble x, GLdouble y, GLdouble z) { MXCAM_REAL(glScaled); mxcam::Hook_glScaled(x, y, z); }
+MXCAM_EXPORT void glNewList(GLuint list, GLenum mode) { MXCAM_REAL(glNewList); mxcam::Hook_glNewList(list, mode); }
+MXCAM_EXPORT void glEndList() { MXCAM_REAL(glEndList); mxcam::Hook_glEndList(); }
+MXCAM_EXPORT void glClear(GLbitfield mask) { MXCAM_REAL(glClear); mxcam::Hook_glClear(mask); }
+MXCAM_EXPORT void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices)
+{
+    MXCAM_REAL(glDrawElements);
+    mxcam::Hook_glDrawElements(mode, count, type, indices);
+}
+MXCAM_EXPORT void glDrawArrays(GLenum mode, GLint first, GLsizei count) { MXCAM_REAL(glDrawArrays); mxcam::Hook_glDrawArrays(mode, first, count); }
+MXCAM_EXPORT void glTexParameteri(GLenum target, GLenum pname, GLint param)
+{
+    MXCAM_REAL(glTexParameteri);
+    mxcam::Hook_glTexParameteri(target, pname, param);
+}
+MXCAM_EXPORT void glTexParameterf(GLenum target, GLenum pname, GLfloat param)
+{
+    MXCAM_REAL(glTexParameterf);
+    mxcam::Hook_glTexParameterf(target, pname, param);
+}
+MXCAM_EXPORT void glTexParameteriv(GLenum target, GLenum pname, const GLint* params)
+{
+    MXCAM_REAL(glTexParameteriv);
+    mxcam::Hook_glTexParameteriv(target, pname, params);
+}
+MXCAM_EXPORT void glTexParameterfv(GLenum target, GLenum pname, const GLfloat* params)
+{
+    MXCAM_REAL(glTexParameterfv);
+    mxcam::Hook_glTexParameterfv(target, pname, params);
+}
+MXCAM_EXPORT void glDeleteTextures(GLsizei n, const GLuint* textures) { MXCAM_REAL(glDeleteTextures); mxcam::Hook_glDeleteTextures(n, textures); }
+MXCAM_EXPORT void glBindTexture(GLenum target, GLuint texture) { MXCAM_REAL(glBindTexture); mxcam::Hook_glBindTexture(target, texture); }
+MXCAM_EXPORT void glDepthMask(GLboolean flag) { MXCAM_REAL(glDepthMask); mxcam::Hook_glDepthMask(flag); }
+MXCAM_EXPORT void glEnable(GLenum capability) { MXCAM_REAL(glEnable); mxcam::Hook_glEnable(capability); }
+MXCAM_EXPORT void glDisable(GLenum capability) { MXCAM_REAL(glDisable); mxcam::Hook_glDisable(capability); }
+MXCAM_EXPORT void glXSwapBuffers(void* display, unsigned long drawable)
+{
+    MXCAM_REAL(glXSwapBuffers);
+    mxcam::Hook_glXSwapBuffers(display, drawable);
+}
+MXCAM_EXPORT void (*glXGetProcAddress(const GLubyte* name))()
+{
+    MXCAM_REAL(glXGetProcAddress);
+    return mxcam::Hook_glXGetProcAddress(name);
+}
+MXCAM_EXPORT void (*glXGetProcAddressARB(const GLubyte* name))()
+{
+    MXCAM_REAL(glXGetProcAddressARB);
+    return mxcam::Hook_glXGetProcAddressARB(name);
+}
+MXCAM_EXPORT unsigned eglSwapBuffers(void* display, void* surface)
+{
+    MXCAM_REAL(eglSwapBuffers);
+    return mxcam::real_eglSwapBuffers ? mxcam::Hook_eglSwapBuffers(display, surface) : 0;
+}
+MXCAM_EXPORT void (*eglGetProcAddress(const char* name))()
+{
+    MXCAM_REAL(eglGetProcAddress);
+    return mxcam::Hook_eglGetProcAddress(name);
+}
+#endif

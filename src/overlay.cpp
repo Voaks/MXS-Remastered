@@ -17,7 +17,13 @@
 //   gets stuck), and the system cursor is replaced by a drawn one.
 
 #include <windows.h>
+#ifdef _WIN32
 #include <wincodec.h>
+#else
+#include "linux/platform_linux.h"
+#include "linux/third_party/stb_image.h"
+#include "linux/third_party/stb_truetype.h"
+#endif
 #include <GL/gl.h>
 #include <atomic>
 #include <cmath>
@@ -42,8 +48,10 @@
 #include "sound_packs.h"
 #include "texfilter.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "windowscodecs.lib")  // (the logo's PNG: WIC)
 #pragma comment(lib, "ole32.lib")
+#endif
 
 namespace mxcam {
 namespace {
@@ -297,6 +305,7 @@ void ReleaseCom(T*& p)
     }
 }
 
+#ifdef _WIN32
 bool DecodeLogo()
 {
     DecodedImage& img = g_logoImage;
@@ -345,6 +354,26 @@ bool DecodeLogo()
         Log("overlay: could not decode the logo (0x%08lX): the title is drawn as text", static_cast<unsigned long>(hr));
     return !img.rgba.empty();
 }
+#else
+bool DecodeLogo()
+{
+    DecodedImage& img = g_logoImage;
+    if (img.tried)
+        return !img.rgba.empty();
+    img.tried = true;
+    int w = 0, h = 0, channels = 0;
+    unsigned char* pixels = stbi_load_from_memory(kLogoPng, static_cast<int>(sizeof kLogoPng), &w, &h, &channels, 4);
+    if (pixels && w > 0 && h > 0 && w <= 4096 && h <= 4096) {
+        img.rgba.assign(pixels, pixels + static_cast<size_t>(w) * h * 4);
+        img.w = w;
+        img.h = h;
+    }
+    stbi_image_free(pixels);
+    if (img.rgba.empty())
+        Log("overlay: could not decode the logo (%s): the title is drawn as text", stbi_failure_reason());
+    return !img.rgba.empty();
+}
+#endif
 
 // The logo shrunk to w x h (area-averaged, through premultiplied alpha so its edges stay clean),
 // written into the atlas's RGBA at (x, y).
@@ -413,6 +442,7 @@ bool BuildAtlas(GLuint texture, float scale)
         }
     }
 
+#ifdef _WIN32
     // Glyphs: each drawn white-on-black by GDI at kSuper times its size, then shrunk into the atlas
     // (averaged), so they're smooth at any size. (Drawn at their own size, GDI turns smoothing off
     // for Arial at the small sizes the menu uses - the font asks it to - and the text came out jagged.)
@@ -537,6 +567,114 @@ bool BuildAtlas(GLuint texture, float scale)
         DeleteObject(font);
     }
     DeleteDC(dc);
+#else
+    // Glyphs: the same faces from the system's fonts (fontconfig picks the file: Arial is Liberation
+    // Sans or the like, Segoe UI the system's sans-serif), each drawn by stb_truetype at kSuper times
+    // its size and shrunk into the atlas the same way as on Windows, laid out the same.
+    constexpr int kSuper = 4;
+    struct FontSpec { int pixels; int weight; const char* face; };
+    const FontSpec specs[kFontCount] = {
+        { 26, 700, "Segoe UI" },  // kFontTitle
+        { 16, 400, "Segoe UI" },  // kFontBody
+        { 16, 700, "Arial" },     // kFontValue
+        { 13, 600, "Segoe UI" },  // kFontSmall
+        { 28, 700, "Arial" },     // kFontTab
+        { 22, 700, "Arial" },     // kFontButton
+        { 17, 700, "Arial" },     // kFontSection
+        { 18, 400, "Arial" },     // kFontLabel
+    };
+    const int pad = 2;
+    int penX = 0, penY = kGlyphTop, rowHeight = 0;
+    bool fits = true;
+
+    for (int f = 0; f < kFontCount && fits; ++f) {
+        const std::vector<unsigned char>& file = platform::FontFile(specs[f].face, specs[f].weight);
+        stbtt_fontinfo info;
+        if (file.empty() || !stbtt_InitFont(&info, file.data(), stbtt_GetFontOffsetForIndex(file.data(), 0))) {
+            Log("overlay: no usable font for %s (install fontconfig and a TrueType sans-serif font)", specs[f].face);
+            fits = false;
+            break;
+        }
+        // (GDI's negative height is the em: the same here.)
+        const float k = stbtt_ScaleForMappingEmToPixels(&info, std::round(specs[f].pixels * scale * kSuper));
+        int ascent = 0, descent = 0, lineGap = 0;
+        stbtt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
+        const int tmAscent = static_cast<int>(std::lround(ascent * k));
+        const int tmHeight = static_cast<int>(std::lround((ascent - descent) * k));
+        Font& out = g_fonts[f];
+        out = Font{};
+        const int lift = (kSuper - tmAscent % kSuper) % kSuper;
+        const int cellHeight = (tmHeight + lift + kSuper - 1) / kSuper;
+        out.lineHeight = static_cast<float>(cellHeight);
+
+        for (int code = 32; code <= 0xB7 && fits; ++code) {
+            if (code > 126 && code != 0xB0 && code != 0xB7)
+                continue;
+            int advanceUnits = 0, lsb = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+            stbtt_GetCodepointHMetrics(&info, code, &advanceUnits, &lsb);
+            stbtt_GetCodepointBitmapBox(&info, code, k, k, &x0, &y0, &x1, &y1);
+            const int abcA = x0, abcB = x1 > x0 ? x1 - x0 : 0;
+            const int advance = static_cast<int>(std::lround(advanceUnits * k));
+            const int ink = abcB > 0 ? abcB : 1;
+            const int cellWidth = (ink + kSuper - 1) / kSuper + 2 * pad;
+            if (penX + cellWidth > kAtlasSize) {
+                penX = 0;
+                penY += rowHeight + pad;
+                rowHeight = 0;
+            }
+            if (penY + cellHeight > kAtlasSize) {
+                fits = false;
+                break;
+            }
+            // The glyph at kSuper times, its ink pad texels in and its baseline tmAscent below lift.
+            const int scratchW = cellWidth * kSuper, scratchH = cellHeight * kSuper;
+            std::vector<uint8_t> scratch(static_cast<size_t>(scratchW) * scratchH, 0);
+            int gw = 0, gh = 0, gx0 = 0, gy0 = 0;
+            unsigned char* glyph = abcB > 0 ? stbtt_GetCodepointBitmap(&info, k, k, code, &gw, &gh, &gx0, &gy0) : nullptr;
+            if (glyph) {
+                const int ox = pad * kSuper, oy = lift + tmAscent + gy0;
+                for (int gy = 0; gy < gh; ++gy) {
+                    const int sy = oy + gy;
+                    if (sy < 0 || sy >= scratchH)
+                        continue;
+                    for (int gx = 0; gx < gw; ++gx) {
+                        const int sx = ox + gx;
+                        if (sx >= 0 && sx < scratchW)
+                            scratch[static_cast<size_t>(sy) * scratchW + sx] = glyph[gy * gw + gx];
+                    }
+                }
+                stbtt_FreeBitmap(glyph, nullptr);
+            }
+            for (int ty = 0; ty < cellHeight; ++ty) {
+                for (int tx = 0; tx < cellWidth; ++tx) {
+                    int sum = 0;
+                    for (int sy = ty * kSuper; sy < (ty + 1) * kSuper; ++sy)
+                        for (int sx = tx * kSuper; sx < (tx + 1) * kSuper; ++sx)
+                            sum += scratch[static_cast<size_t>(sy) * scratchW + sx];
+                    coverage[static_cast<size_t>(penY + ty) * kAtlasSize + penX + tx] =
+                        static_cast<uint8_t>((sum + kSuper * kSuper / 2) / (kSuper * kSuper));
+                }
+            }
+
+            Glyph& g  = out.glyphs[code];
+            g.u0      = static_cast<float>(penX) / kAtlasSize;
+            g.v0      = static_cast<float>(penY) / kAtlasSize;
+            g.u1      = static_cast<float>(penX + cellWidth) / kAtlasSize;
+            g.v1      = static_cast<float>(penY + cellHeight) / kAtlasSize;
+            g.width   = static_cast<float>(cellWidth);
+            g.height  = static_cast<float>(cellHeight);
+            g.bearing = static_cast<float>(abcA) / kSuper - pad;
+            g.advance = static_cast<float>(advance) / kSuper;
+            g.valid   = true;
+
+            penX += cellWidth + pad;
+            rowHeight = rowHeight > cellHeight ? rowHeight : cellHeight;
+        }
+        penX = 0;
+        penY += rowHeight + pad;
+        rowHeight = 0;
+    }
+#endif
     const int logoTop = penY + 2;  // (under the glyphs)
     if (!fits)
         return false;
@@ -1634,6 +1772,7 @@ void UpdateSoundPacks(double now)
     }
 }
 
+#ifdef _WIN32
 // ---- Fullscreen window (Config::fullscreenWindow) --------------------------------------------
 // The game's window in windowed mode made borderless and stretched over its monitor; what it was
 // (style, extended style, placement) is kept to put it back when the option is turned off. A
@@ -1711,6 +1850,10 @@ void UpdateFullscreenWindow(HWND window, bool wanted)
                  SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS);
 }
 
+#else
+void UpdateFullscreenWindow(HWND, bool) {}  // (the window manager's own fullscreen)
+#endif
+
 void NoteMouseActivity()
 {
     // For automated tests: the real mouse (whoever is at the desk) doesn't count.
@@ -1778,10 +1921,13 @@ double Seconds()
 
 std::atomic<bool> g_menuOpen{ false };  // read by the window procedure (the window's thread)
 std::atomic<int>  g_wheelDelta{ 0 };    // the mouse wheel while the menu is open (WHEEL_DELTA a notch)
+#ifdef _WIN32
 HWND    g_hookedWindow   = nullptr;
 WNDPROC g_previousProc   = nullptr;
 bool    g_windowUnicode  = true;
+#endif
 
+#ifdef _WIN32
 LRESULT CALLBACK PanelWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     // Esc going down for the game (not held, not to this panel, which keeps presses to itself): the
@@ -1851,6 +1997,12 @@ void SubclassWindow(HWND window)
         SetWindowLongPtrA(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&PanelWindowProc));
     g_hookedWindow = window;
 }
+
+#else
+// (Linux: the game's X11 events pass linux/input_linux.cpp, which asks the panel with
+// OverlayTakesInput and gives it the wheel with OverlayWheel.)
+void SubclassWindow(HWND) {}
+#endif
 
 void OpenPanel(HWND window)
 {
@@ -2342,6 +2494,7 @@ constexpr float kPanelW = 1400.0f, kPanelH = 800.0f;
 
 float PanelHeightAtScale1() { return kPanelH + 2.0f * 16.0f; }
 
+#ifdef _WIN32
 // The Windows clipboard, for preset codes (shared as text: Discord and the like).
 bool CopyToClipboard(const std::string& text)
 {
@@ -2384,6 +2537,12 @@ std::string ClipboardText()
     CloseClipboard();
     return text;
 }
+
+#else
+// The clipboard (X11 or Wayland), for preset codes.
+bool CopyToClipboard(const std::string& text) { return platform::ClipboardSet(text); }
+std::string ClipboardText() { return platform::ClipboardGet(); }
+#endif
 
 // Where the panel is on screen (at the atlas's scale): its left, top, width and height.
 struct PanelPlace { float x = 0, y = 0, w = 0, h = 0; };
@@ -3620,6 +3779,17 @@ bool OverlayListeningForKey()
 }
 
 bool OverlayPanelOpen() { return g_panel.open; }
+
+// The game's input events as they reach it (Linux: linux/input_linux.cpp; Windows has the window
+// procedure above for the same).
+bool OverlayTakesInput() { return g_menuOpen.load(std::memory_order_relaxed); }
+void OverlayWheel(int notches) { g_wheelDelta += notches * 120; }
+void OverlayGameKeyDown(int vk, bool repeat)
+{
+    g_keyMessages = true;
+    if (vk == VK_ESCAPE && !repeat && !g_menuOpen.load(std::memory_order_relaxed))
+        ++g_gameEscapes;
+}
 
 bool HideGameOverlayNow(bool cursor)
 {

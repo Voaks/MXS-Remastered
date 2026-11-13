@@ -17,11 +17,20 @@
 #include "gamepad.h"
 
 #include <windows.h>
+#ifdef _WIN32
 #include <mmsystem.h>
 #include <xinput.h>
 #include <roapi.h>
 #include <winstring.h>
 #include <windows.gaming.input.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <linux/joystick.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#define JOY_POVCENTERED 0xFFFF
+#endif
 
 #include <atomic>
 #include <cctype>
@@ -42,6 +51,7 @@ constexpr int IndexOf(Control c) { return c & 0xFF; }
 
 constexpr double kPressed = 0.5;  // a stick or trigger counts as pressed past this
 
+#ifdef _WIN32
 typedef DWORD(WINAPI* XInputGetStateFn)(DWORD, XINPUT_STATE*);
 typedef MMRESULT(WINAPI* JoyGetPosExFn)(UINT, LPJOYINFOEX);
 typedef MMRESULT(WINAPI* JoyGetDevCapsFn)(UINT_PTR, LPJOYCAPSW, UINT);
@@ -58,6 +68,19 @@ std::atomic<int> g_joystick{ -1 };   // joystick id in use, -1 = none
 std::atomic<unsigned> g_paddles{ 0 };     // bits 0..3, from the Windows.Gaming.Input thread
 std::atomic<bool>     g_havePaddlePad{ false };
 
+#else
+constexpr double kSearchInterval = 1.0;  // s between looks for a controller plugged in
+bool g_started = false;
+
+double NowSeconds()
+{
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<double>(t.QuadPart) / 1e9;
+}
+#endif
+
+#ifdef _WIN32
 // The joystick in use: its axes' ranges (from its caps), which it has.
 struct JoyAxes {
     DWORD min[6] = {}, max[6] = {};
@@ -65,6 +88,8 @@ struct JoyAxes {
 };
 JoyAxes g_joyAxes;
 int     g_joyAxesFor = -1;
+
+#endif
 
 // The last Poll().
 struct State {
@@ -105,6 +130,7 @@ void ListControls()
         g_all[g_allCount++] = Make(kJoyAxis, a);
 }
 
+#ifdef _WIN32
 bool ReadXInput(int pad, State& out)
 {
     XINPUT_STATE state{};
@@ -166,6 +192,8 @@ bool ReadJoystick(int id, State& out)
     return true;
 }
 
+#endif
+
 // The joystick API reports the d-pad as a hat: centred, or an angle in hundredths of a degree
 // clockwise from up. Each direction takes the 90 deg around it; the diagonals into down count
 // as down.
@@ -203,6 +231,7 @@ bool Down(const State& s, Control c)
     }
 }
 
+#ifdef _WIN32
 // ---- Windows.Gaming.Input: only for the paddles ----
 // Its own thread: it starts the Windows Runtime (multithreaded) there, never on the game's thread,
 // and polls the first gamepad it lists at ~250 Hz (once a second while there is none).
@@ -329,6 +358,168 @@ void Start()
         CloseHandle(thread);
 }
 
+#else
+// ---- Linux: the joystick devices (/dev/input/js*) ----
+// The kernel says which of its codes each button and axis of a pad is (JSIOCGBTNMAP / AXMAP), so
+// any gamepad - an Xbox one, a PlayStation one, most others - reads as the Xbox-style pad the
+// controls are named after: A B X Y, the bumpers, the stick clicks, the sticks, the triggers and
+// the d-pad (a hat or buttons). Its raw buttons and axes are kept as well (JOY_BUTTON / JOY_ axes).
+struct LinuxPad {
+    int      fd = -1;
+    char     name[128] = "";
+    uint8_t  axisCodes[ABS_CNT] = {};
+    uint16_t buttonCodes[KEY_MAX - BTN_MISC + 1] = {};
+    int      axes = 0, buttons = 0;
+    int16_t  axis[ABS_CNT] = {};
+    uint32_t pressed[(KEY_MAX - BTN_MISC + 1 + 31) / 32] = {};
+    bool     gamepad = false;  // reads as an Xbox-style pad
+};
+LinuxPad g_pad;
+double   g_nextSearch = 0;
+
+void ClosePad()
+{
+    if (g_pad.fd >= 0)
+        close(g_pad.fd);
+    g_pad = LinuxPad{};
+}
+
+bool OpenPad(int index)
+{
+    char path[32];
+    snprintf(path, sizeof path, "/dev/input/js%d", index);
+    const int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    LinuxPad pad;
+    pad.fd = fd;
+    uint8_t axes = 0, buttons = 0;
+    ioctl(fd, JSIOCGAXES, &axes);
+    ioctl(fd, JSIOCGBUTTONS, &buttons);
+    pad.axes = axes;
+    pad.buttons = buttons;
+    if (ioctl(fd, JSIOCGNAME(sizeof pad.name), pad.name) < 0)
+        snprintf(pad.name, sizeof pad.name, "controller %d", index);
+    ioctl(fd, JSIOCGAXMAP, pad.axisCodes);
+    ioctl(fd, JSIOCGBTNMAP, pad.buttonCodes);
+    for (int b = 0; b < pad.buttons; ++b)
+        if (pad.buttonCodes[b] == BTN_SOUTH)  // (a gamepad's A / cross)
+            pad.gamepad = true;
+    g_pad = pad;
+    Log("gamepad: using %s (%s, %d axes, %d buttons)%s", path, pad.name, pad.axes, pad.buttons,
+        pad.gamepad ? "" : ": not a gamepad layout, its buttons and axes are bound by number");
+    return true;
+}
+
+void SearchPads(double now)
+{
+    if (g_pad.fd >= 0 || now < g_nextSearch)
+        return;
+    g_nextSearch = now + kSearchInterval;
+    for (int i = 0; i < 8; ++i)
+        if (OpenPad(i))
+            return;
+}
+
+// The pad's events since the last frame (the first ones a pad sends are its state as it is).
+bool ReadPad()
+{
+    js_event e;
+    for (;;) {
+        const ssize_t n = read(g_pad.fd, &e, sizeof e);
+        if (n != static_cast<ssize_t>(sizeof e)) {
+            if (n < 0 && (errno == EAGAIN || errno == EINTR))
+                return true;
+            return false;  // (unplugged)
+        }
+        const int type = e.type & ~JS_EVENT_INIT;
+        if (type == JS_EVENT_AXIS && e.number < ABS_CNT) {
+            g_pad.axis[e.number] = e.value;
+        } else if (type == JS_EVENT_BUTTON) {  // (its number fits: pressed[] holds 256)
+            if (e.value)
+                g_pad.pressed[e.number / 32] |= 1u << (e.number % 32);
+            else
+                g_pad.pressed[e.number / 32] &= ~(1u << (e.number % 32));
+        }
+    }
+}
+
+void FillState(State& out)
+{
+    const auto Pressed = [](int b) { return (g_pad.pressed[b / 32] & (1u << (b % 32))) != 0; };
+    const auto Stick = [](int16_t v) { return v < 0 ? v / 32768.0 : v / 32767.0; };
+    out.joy = true;
+    for (int b = 0; b < g_pad.buttons && b < 32; ++b)
+        if (Pressed(b))
+            out.joyButtons |= 1u << b;
+    for (int a = 0; a < 6 && a < g_pad.axes; ++a)
+        out.joyAxis[a] = Stick(g_pad.axis[a]);
+    int hatX = 0, hatY = 0;
+    for (int a = 0; a < g_pad.axes; ++a) {
+        if (g_pad.axisCodes[a] == ABS_HAT0X)
+            hatX = g_pad.axis[a] < -16384 ? -1 : g_pad.axis[a] > 16384 ? 1 : 0;
+        else if (g_pad.axisCodes[a] == ABS_HAT0Y)
+            hatY = g_pad.axis[a] < -16384 ? -1 : g_pad.axis[a] > 16384 ? 1 : 0;
+    }
+    if (hatX || hatY) {  // (as the joystick API's hat: hundredths of a degree clockwise from up)
+        static const DWORD kPov[3][3] = { { 31500, 27000, 22500 }, { 0, JOY_POVCENTERED, 18000 }, { 4500, 9000, 13500 } };
+        out.pov = kPov[hatX + 1][hatY + 1];
+    }
+    if (!g_pad.gamepad)
+        return;
+    // As XInput's: its button bits, sticks up positive, triggers 0..1.
+    out.x = true;
+    WORD buttons = 0;
+    for (int b = 0; b < g_pad.buttons; ++b) {
+        if (!Pressed(b))
+            continue;
+        switch (g_pad.buttonCodes[b]) {
+        case BTN_DPAD_UP:    buttons |= 0x0001; break;
+        case BTN_DPAD_DOWN:  buttons |= 0x0002; break;
+        case BTN_DPAD_LEFT:  buttons |= 0x0004; break;
+        case BTN_DPAD_RIGHT: buttons |= 0x0008; break;
+        case BTN_START:      buttons |= 0x0010; break;
+        case BTN_SELECT:     buttons |= 0x0020; break;
+        case BTN_THUMBL:     buttons |= 0x0040; break;
+        case BTN_THUMBR:     buttons |= 0x0080; break;
+        case BTN_TL:         buttons |= 0x0100; break;
+        case BTN_TR:         buttons |= 0x0200; break;
+        case BTN_SOUTH:      buttons |= 0x1000; break;  // A
+        case BTN_EAST:       buttons |= 0x2000; break;  // B
+        case BTN_NORTH:      buttons |= 0x4000; break;  // X (the kernel's BTN_X)
+        case BTN_WEST:       buttons |= 0x8000; break;  // Y (the kernel's BTN_Y)
+        default: break;
+        }
+    }
+    if (hatY < 0) buttons |= 0x0001;
+    if (hatY > 0) buttons |= 0x0002;
+    if (hatX < 0) buttons |= 0x0004;
+    if (hatX > 0) buttons |= 0x0008;
+    out.buttons = buttons;
+    for (int a = 0; a < g_pad.axes; ++a) {
+        const double v = Stick(g_pad.axis[a]);
+        switch (g_pad.axisCodes[a]) {
+        case ABS_X:  out.axes[0] = v; break;
+        case ABS_Y:  out.axes[1] = -v; break;
+        case ABS_RX: out.axes[2] = v; break;
+        case ABS_RY: out.axes[3] = -v; break;
+        case ABS_Z:
+        case ABS_BRAKE: out.lt = (v + 1.0) * 0.5; break;
+        case ABS_RZ:
+        case ABS_GAS:   out.rt = (v + 1.0) * 0.5; break;
+        default: break;
+        }
+    }
+}
+
+void Start()
+{
+    g_started = true;
+    ListControls();
+}
+
+#endif
+
 struct Named { Control control; const char* key; const char* name; };
 const Named* NameTable(int& count)
 {
@@ -385,6 +576,16 @@ void Poll()
     if (!g_started)
         Start();
     State s;
+#ifndef _WIN32
+    SearchPads(NowSeconds());
+    if (g_pad.fd >= 0 && !ReadPad()) {
+        Log("gamepad: %s disconnected", g_pad.name);
+        ClosePad();
+    }
+    if (g_pad.fd >= 0)
+        FillState(s);
+    g_state = s;
+#else
     const int xinputPad = g_xinputPad;
     if (xinputPad >= 0 && !ReadXInput(xinputPad, s)) {
         Log("gamepad: XInput controller %d disconnected", xinputPad);
@@ -398,6 +599,7 @@ void Poll()
     }
     s.paddles = g_paddles;
     g_state = s;
+#endif
 }
 
 bool IsDown(Control control) { return control != kNone && Down(g_state, control); }
@@ -470,10 +672,15 @@ Control ParseControl(const char* key)
 
 const char* StatusText()
 {
+#ifdef _WIN32
     if (g_xinputPad >= 0)
         return "XBOX PAD";
     if (g_joystick >= 0)
         return "PAD";
+#else
+    if (g_pad.fd >= 0)
+        return g_pad.gamepad ? "GAMEPAD" : "PAD";
+#endif
     return "NO PAD";
 }
 

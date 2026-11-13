@@ -29,4 +29,11 @@ int TakeGameEscapes();
 // The mouse in the game window's client area (pixels from its top left), false if unknown.
 bool GameCursorPos(float& x, float& y);
 
+// The game's input as it arrives (Linux, from its X11 events): whether the menu keeps presses to
+// itself (true while it's open), the mouse wheel (notches, + away from you), and a key going down
+// for the game (Esc: the game's menu; see HideGameOverlayNow).
+bool OverlayTakesInput();
+void OverlayWheel(int notches);
+void OverlayGameKeyDown(int vk, bool repeat);
+
 }  // namespace mxcam

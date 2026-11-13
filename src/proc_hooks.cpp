@@ -315,7 +315,7 @@ void NoteUniformValue(GLint location, GLsizei count, int kind, const GLfloat* f,
         slot.listed = true;
         u.used.push_back(location);
     }
-    if (count != 1 || !f && kind != 1) {
+    if (count != 1 || (!f && kind != 1)) {
         slot.kind = 0;
     } else {
         slot.kind = static_cast<unsigned char>(kind);

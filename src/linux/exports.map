@@ -1,0 +1,19 @@
+/* The only symbols libmxs-remastered.so shows the game: the OpenGL, GLX, EGL and X11 functions it
+   stands in for (hooks.cpp, linux/input_linux.cpp). Everything else - the C++ runtime it carries
+   among it - stays inside, so nothing of the game's or its drivers' is replaced by it. */
+{
+    global:
+        gl*;
+        egl*;
+        XNextEvent;
+        XIfEvent;
+        XCheckIfEvent;
+        XWindowEvent;
+        XCheckWindowEvent;
+        XMaskEvent;
+        XCheckMaskEvent;
+        XCheckTypedEvent;
+        XCheckTypedWindowEvent;
+    local:
+        *;
+};
