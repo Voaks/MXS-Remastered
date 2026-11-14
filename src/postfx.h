@@ -130,6 +130,16 @@ const char* WheelTraceText();
 // Cheap: whether the draws near the camera should be collected for it (they find your wheels'
 // draw calls for the tire dirt, drawn by the bike shader itself: proc_hooks PaintTireDirt).
 bool WantsWheelMask();
+// WEATHER: the wet shine the bike shader gives everything it draws in the rain (proc_hooks
+// PaintWet), as last worked out (the frame before). false: dry (no rain, or no shaders).
+struct WetLook {
+    bool  valid = false;
+    float wet = 0.0f;                      // 0..1 Config::wetness
+    float shine = 0.0f;                    // how strongly it reflects (Config::rainReflections)
+    float sky[3] = {}, ground[3] = {};     // what it reflects above and below, in the game's colours
+    float up[3] = { 0.0f, 1.0f, 0.0f };    // the world's up in the drawn view (eye space)
+};
+bool GetWetLook(WetLook& out);
 // This frame's camera (the game's view), once the 3D scene has started.
 bool FrameRawView(double raw[16]);
 // The one it's drawn with (after the helmet cam's correction: an uploaded u_modelview is

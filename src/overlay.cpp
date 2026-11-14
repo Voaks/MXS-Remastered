@@ -1657,9 +1657,24 @@ const RowDef kRows[] = {
 
     // ======== WEATHER ========
     Toggle(kTabWeather, "RAIN",           "Rain",                      &Config::rain)
-        .Help("Rain is coming in a future update: wet, darker dirt, puddles and rain falling around you.")
-        .Badge("COMING SOON")
-        .Locked(),
+        .Help("Rain on the track: drops falling all around you under a dark, overcast sky, the dirt "
+              "soaked and darker, puddles that reflect the sky and the bikes, and a wet shine on every "
+              "bike and rider. Needs the shaders on (GRAPHICS)."),
+    Slider(kTabWeather, nullptr,          "Rainfall",                  &Config::rainfall,         0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
+        .Help("How hard it rains: the drops falling around you (they streak past as you ride), the "
+              "ripples they make in the puddles and the haze in the distance. Off keeps everything wet "
+              "with nothing falling."),
+    Slider(kTabWeather, nullptr,          "Wind",                      &Config::rainWind,         0.0,   1.0,   0.01,   100.0,  0, "%", "Calm")
+        .Help("How hard the wind blows the rain sideways."),
+    Slider(kTabWeather, nullptr,          "Wetness",                   &Config::wetness,          0.0,   1.0,   0.01,   100.0,  0, "%", "Dry")
+        .Help("How wet everything looks: the dirt darker and soaked, with a sheen toward the distance, "
+              "and the bikes, riders and gear wet and shiny, beaded with water."),
+    Slider(kTabWeather, nullptr,          "Puddles",                   &Config::puddles,          0.0,   1.0,   0.01,   100.0,  0, "%", "None")
+        .Help("How much standing water there is: puddles on the flat parts of the track, and water "
+              "in the deepest ruts."),
+    Slider(kTabWeather, nullptr,          "Reflections",               &Config::rainReflections,  0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
+        .Help("How strongly the puddles and the wet ground reflect: the sky and what stands around them "
+              "(bikes, riders, trees, banners). Lower costs a little less."),
     Toggle(kTabWeather, "SNOW",           "Snow",                      &Config::snow)
         .Help("Snow on the track: the ground turns white (thinner on steep slopes, your ruts dig "
               "through it to the dirt) under a grey, overcast sky. Needs the shaders on (GRAPHICS)."),
@@ -2485,6 +2500,12 @@ bool RowInactive(const RowDef& def, const Config& cfg)
         if (def.number == &Config::headlightBeamDeg || def.number == &Config::headlightAimDeg ||
             def.flag == &Config::headlightEveryBike || def.option == &Config::headlightColor)
             return cfg.timeOfDay < 0 || cfg.headlight <= 0;
+        if (def.number == &Config::rainfall || def.number == &Config::wetness || def.number == &Config::puddles)
+            return !cfg.rain;
+        if (def.number == &Config::rainWind)
+            return !cfg.rain || cfg.rainfall <= 0.0;
+        if (def.number == &Config::rainReflections)
+            return !cfg.rain || (cfg.wetness <= 0.0 && cfg.puddles <= 0.0);
         if (def.number == &Config::snowfall)
             return !cfg.snow;
         if (def.number == &Config::snowWind)
@@ -3180,8 +3201,14 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
         } else if (g_panel.tab == kTabWeather) {
             if (!cfg.shaders)
                 snprintf(readout, sizeof readout, "WEATHER NEEDS THE SHADERS ON (GRAPHICS TAB)");
-            else if (!cfg.snow)
-                snprintf(readout, sizeof readout, "NO WEATHER   \xB7   TURN ON SNOW TO MAKE IT SNOW");
+            else if (!cfg.snow && !cfg.rain)
+                snprintf(readout, sizeof readout, "NO WEATHER   \xB7   TURN ON RAIN OR SNOW");
+            else if (cfg.rain && cfg.snow)
+                snprintf(readout, sizeof readout, "RAIN %.0f%%   \xB7   SNOW ON THE GROUND   \xB7   SNOWFALL %.0f%%",
+                         cfg.rainfall * 100.0, cfg.snowfall * 100.0);
+            else if (cfg.rain)
+                snprintf(readout, sizeof readout, "RAIN ON   \xB7   RAINFALL %.0f%%   \xB7   WETNESS %.0f%%   \xB7   PUDDLES %.0f%%",
+                         cfg.rainfall * 100.0, cfg.wetness * 100.0, cfg.puddles * 100.0);
             else
                 snprintf(readout, sizeof readout, "SNOW ON   \xB7   SNOWFALL %.0f%%   \xB7   WIND %.0f%%", cfg.snowfall * 100.0,
                          cfg.snowWind * 100.0);

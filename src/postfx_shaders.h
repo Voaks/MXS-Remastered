@@ -177,9 +177,9 @@ uniform float u_ultra;          // Config::ultraGraphics: the ground's detail fu
 // pixel's offset from it, and a pattern's phase can't be taken from that: it jumped at every wrap,
 // the whole ground's texture changing under you every 20 m. Each pattern's phase at the camera's
 // true position comes from the CPU instead, in double precision, as its whole part and fraction.
-uniform float u_freq[11];
-uniform vec3  u_phaseI[11];
-uniform vec3  u_phaseF[11];
+uniform float u_freq[14];
+uniform vec3  u_phaseI[14];
+uniform vec3  u_phaseF[14];
 uniform float u_haveTerrain;
 uniform sampler2D u_markMap;    // tire marks on the ground (see postfx.cpp: TireMarks)
 uniform float u_marks;          // 0 = off
@@ -236,8 +236,14 @@ uniform vec3  u_headBeam;       // radians: the beam's half-width, the middle of
 uniform vec3  u_headColor;      // the light's colour (white or amber, Config::headlightAmber)
 uniform float u_headReach;      // how far it reaches (1 = level; more aimed up, less aimed down)
 uniform float u_snow;           // WEATHER: 0..1 snow on the ground and an overcast sky (0: no weather)
-uniform float u_snowfall;       // 0..1 how heavily it falls: the haze in the distance
-uniform vec3  u_snowFog;        // that haze's colour (as bright as the light of the time of day)
+uniform float u_overcast;       // WEATHER: 0..1 how overcast the sky is (snow or rain)
+uniform float u_weatherHaze;    // 0..1 the haze the falling snow or rain makes in the distance
+uniform vec3  u_weatherFog;     // that haze's colour (as bright as the light of the time of day)
+uniform float u_rain;           // WEATHER: 1 = rain (a darker sky, wet ground, puddles)
+uniform float u_rainfall;       // 0..1 how hard it rains (the rings in the puddles)
+uniform float u_wet;            // 0..1 how wet the ground is (Config::wetness)
+uniform float u_puddles;        // 0..1 how much standing water
+uniform float u_reflect;        // 0..1 how strongly the water and the wet ground reflect
 
 // 1 = lit, 0 = in the shadow of something the sun's view saw first. 3 x 3 hardware-filtered
 // taps for soft edges; fades out at the edge of the map.
@@ -364,7 +370,7 @@ vec2 LightAt(vec2 uv, float z)
 // Which pattern (u_freq / u_phase*).
 const int kPatternDirt = 0, kPatternDirtFine = 1, kPatternClods = 2, kPatternPatches = 3, kPatternPatchesWide = 4,
           kPatternRutFloor = 5, kPatternRutClods = 6, kPatternRutCrumbs = 7, kPatternDrifts = 8, kPatternDriftsFine = 9,
-          kPatternSnow = 10;
+          kPatternSnow = 10, kPatternPuddles = 11, kPatternPuddlesFine = 12, kPatternRipples = 13;
 
 // wp (the shader's world position: the wrapped camera plus the pixel's offset) times pattern k's
 // frequency: its fraction-carrying part, small and exact - the pixel's offset scaled, plus the
@@ -832,10 +838,12 @@ vec3 NightSky(vec3 d)
 {
     float h = dot(d, u_up);
     vec3 col = NightBase(h);
-    col += Stars(d) * smoothstep(0.0, 0.2, h);
+    // (WEATHER: the clouds hide the stars and the moon - its glow through them a little.)
+    col += Stars(d) * (smoothstep(0.0, 0.2, h) * (1.0 - u_overcast));
     float m = dot(d, u_moonWorld);
-    col += vec3(0.85, 0.88, 0.95) * smoothstep(0.99955, 0.99975, m) * 1.5;
-    col += vec3(0.25, 0.30, 0.45) * (pow(max(m, 0.0), 300.0) * 0.12 + pow(max(m, 0.0), 16.0) * 0.012) * u_nightLevel;
+    col += vec3(0.85, 0.88, 0.95) * smoothstep(0.99955, 0.99975, m) * (1.5 * (1.0 - u_overcast));
+    col += vec3(0.25, 0.30, 0.45) * (pow(max(m, 0.0), 300.0) * 0.12 + pow(max(m, 0.0), 16.0) * 0.012) * u_nightLevel *
+           (1.0 - 0.7 * u_overcast);
     return col;
 }
 
@@ -860,6 +868,185 @@ vec3 Sky(vec3 game, vec3 d)
     return mix(dusk, NightSky(d), u_night);
 }
 
+)GLSL" R"GLSL(
+// ---- Rain (WEATHER) ----------------------------------------------------------------------
+// The sky as the composite shows it, looking along d (world): the game's sky colour there (game,
+// as it drew it), painted by the time of day and, in the weather, overcast - darker in the rain.
+vec3 SkyLook(vec3 game, vec3 d)
+{
+    vec3 c = game;
+    if (u_tod > 0.5)
+        c = Sky(c, d);
+    if (u_overcast > 0.0) {
+        // Overcast: the blue goes grey, the clouds stay a little lighter, the sun is hidden.
+        float l = Luma(c);
+        vec3 overcast = (vec3(l) * vec3(0.93, 0.97, 1.04) * 0.92 + u_weatherFog * 0.08) * (1.0 - 0.3 * u_rain);
+        c = mix(c, overcast, (0.85 + 0.1 * u_rain) * u_overcast);
+        c = mix(c, u_weatherFog, 0.35 * u_weatherHaze * u_overcast * (1.0 - smoothstep(0.0, 0.35, dot(d, u_up))));
+    }
+    return c;
+}
+
+// The overcast sky's light, soft, for what reflects it blurred (wet dirt) or where the sky itself
+// isn't on screen: the haze's colour at the horizon, lighter overhead.
+vec3 SoftSky(vec3 d)
+{
+    return u_weatherFog * mix(1.0, 1.3, sqrt(clamp(dot(d, u_up), 0.0, 1.0)));
+}
+
+// The picture graded as the composite grades the ground (the time of day's tint, its exposure):
+// for what a reflection finds on screen, which is the game's own colour.
+vec3 Graded(vec3 c)
+{
+    if (u_tod > 0.5) {
+        c *= u_tint * u_exposure;
+        c = mix(c, vec3(Luma(c)), u_desaturate);
+    }
+    return c;
+}
+
+// Standing water at wp (0..1): puddles where the ground lies level, in patches over the track
+// (more of them and bigger the more Puddles asks for), and here and there in the deepest ruts
+// (rut: how much groove the tires dug here). damp: the soaked band around each puddle.
+float PuddleAt(vec3 wp, vec3 n, float rut, out float damp)
+{
+    damp = 0.0;
+    if (u_puddles <= 0.0)
+        return 0.0;
+    float level = smoothstep(0.955, 0.993, dot(n, u_up));
+    float fine = PatternNoise(wp, kPatternPuddlesFine);
+    float noise = PatternNoise(wp, kPatternPuddles) * 0.7 + fine * 0.3;
+    float edge = 0.76 - 0.2 * u_puddles;
+    damp = smoothstep(edge - 0.1, edge, noise);
+    float pool = smoothstep(edge, edge + 0.02, noise) * level;
+    float inRut = smoothstep(0.45, 0.8, rut) * smoothstep(0.62 - 0.22 * u_puddles, 0.66 - 0.22 * u_puddles, fine);
+    return max(pool, inRut);
+}
+
+// The rain's rings on standing water: the slope they give its surface across the ground. Each
+// cell of a grid over the water (about 25 cm, two grids a half cell apart) has a drop land in it
+// now and then, at a place of its own each time, and its ring spreads out and dies away. Faded out
+// with the distance, where the rings would only shimmer.
+vec2 Ripples(vec3 wp, float z)
+{
+    float fade = (1.0 - smoothstep(5.0 * u_metre, 20.0 * u_metre, z)) * u_rainfall;
+    vec2 slope = vec2(0.0);
+    if (fade <= 0.0)
+        return slope;
+    vec2 q0 = PatternPos(wp, kPatternRipples).xz;
+    for (int layer = 0; layer < 2; ++layer) {
+        vec2 q = q0 + vec2(0.5 * float(layer));
+        vec2 cell = floor(q), f = q - cell;
+        vec2 whole = u_phaseI[kPatternRipples].xz + cell;
+        float t = u_time * 1.3 + Hash13(vec3(whole, 1.0 + float(layer)));
+        float drop = floor(t);
+        t -= drop;
+        vec3 key = vec3(whole, drop * 7.0 + float(layer));
+        if (Hash13(key + 5.0) > 0.25 + 0.7 * u_rainfall)
+            continue;
+        vec2 centre = 0.3 + 0.4 * vec2(Hash13(key), Hash13(key + 2.0));
+        vec2 dv = f - centre;
+        float d = length(dv);
+        float x = d - t * 0.42;  // behind the ring's front: < 0
+        float wave = cos(x * 70.0) * exp(-x * x * 900.0) * (1.0 - t) * (1.0 - t);
+        slope += dv / max(d, 1e-3) * wave;
+    }
+    return slope * (0.22 * fade);
+}
+
+// Screen-space reflection: what the ray from p along r (view space) meets on the screen, the
+// game's own colour of it; found: how sure (0 = nothing, off the screen or only sky). Steps that
+// grow as it goes (about 45 m in all), then a few halvings onto the surface it went behind.
+vec3 TraceReflection(vec3 p, vec3 r, float jitter, out float found)
+{
+    found = 0.0;
+    float stepLen = 0.15 * u_metre + 0.004 * (-p.z);
+    vec3 q = p + r * (stepLen * jitter);
+    vec3 prev = q;
+    for (int i = 0; i < 24; ++i) {
+        prev = q;
+        q += r * stepLen;
+        stepLen *= 1.18;
+        if (q.z > -0.05 * u_metre)
+            break;  // behind the camera
+        vec2 uv = Project(q);
+        if (!OnScreen(uv))
+            break;
+        float d = textureLod(u_depth, uv, 0.0).r;
+        if (IsSky(d))
+            continue;
+        float behind = -q.z - LinearZ(d);
+        if (behind > 0.0) {
+            if (behind > stepLen * 1.5 + 0.3 * u_metre)
+                continue;  // went behind something nearer: not what it meets
+            vec3 a = prev, b = q;
+            for (int k = 0; k < 4; ++k) {
+                vec3 m = 0.5 * (a + b);
+                if (-m.z > LinearZ(textureLod(u_depth, Project(m), 0.0).r))
+                    b = m;
+                else
+                    a = m;
+            }
+            uv = Project(b);
+            vec2 edge = smoothstep(vec2(0.0), vec2(0.07), uv) * smoothstep(vec2(0.0), vec2(0.07), 1.0 - uv);
+            found = edge.x * edge.y * (1.0 - 0.5 * float(i) / 24.0);
+            return Graded(pow(max(textureLod(u_color, uv, 0.0).rgb, vec3(0.0)), vec3(2.2)));
+        }
+    }
+    return vec3(0.0);
+}
+
+// Rain on the ground (WEATHER): the dirt soaked, darker and deeper in colour (more so around the
+// puddles), and muddy water standing in them. Returns the ground's own colour; refl / reflW: what
+// its surface reflects and how much of it, laid over after the lighting (a reflection isn't in the
+// sun's shadows): the soft sky on wet dirt, strongest at a glance (the wet look of the distance),
+// and in the puddles a mirror - the sky as it's on screen along the reflected ray, and whatever
+// the ray meets on screen (bikes, riders, trees, banners), rippled by the rain.
+vec3 Rain(vec3 c, vec3 p, vec3 nView, vec3 wp, vec3 n, vec3 dir, float z, float ground, float rut,
+          out vec3 refl, out float reflW)
+{
+    refl = vec3(0.0);
+    reflW = 0.0;
+    float damp;
+    float water = PuddleAt(wp, n, rut, damp) * ground;
+    float soak = clamp(u_wet * (0.8 + 0.2 * damp), 0.0, 1.0) * ground;
+    vec3 deep = max(mix(vec3(Luma(c)), c, 1.3), vec3(0.0)) * 0.5;
+    c = mix(c, deep, soak);
+    vec3 muddy = mix(c * 0.6, vec3(Luma(c)) * vec3(1.05, 0.95, 0.8) * 0.55, 0.4);
+    c = mix(c, muddy, water);
+    float wet = max(u_wet * ground, water);
+    if (u_reflect <= 0.0 || wet <= 0.001)
+        return c;
+    vec2 rip = water > 0.02 ? Ripples(wp, z) : vec2(0.0);
+    vec3 nw = normalize(u_up + vec3(rip.x, 0.0, rip.y));  // the water lies level (world y up, as the patterns)
+    vec3 nr = normalize(mix(n, nw, water));
+    float fres = 0.02 + 0.98 * pow(1.0 - clamp(dot(-dir, nr), 0.0, 1.0), 5.0);
+    vec3 r = reflect(dir, nr);
+    r = normalize(r + u_up * max(0.03 - dot(r, u_up), 0.0));  // never down into the ground
+    vec3 env = SoftSky(r);
+    vec3 mirror = env;
+    if (water > 0.02 && z < 150.0 * u_metre) {
+        vec3 rv = transpose(u_viewToWorld) * r;  // view space
+        // The sky along r is the sky on screen where r's vanishing point is.
+        vec4 vc = u_proj * vec4(rv, 0.0);
+        if (vc.w > 1e-4) {
+            vec2 vuv = vc.xy / vc.w * 0.5 + 0.5;
+            if (OnScreen(vuv) && IsSky(textureLod(u_depth, vuv, 0.0).r)) {
+                vec2 edge = smoothstep(vec2(0.0), vec2(0.1), vuv) * smoothstep(vec2(0.0), vec2(0.1), 1.0 - vuv);
+                vec3 s = SkyLook(pow(max(textureLod(u_color, vuv, 0.0).rgb, vec3(0.0)), vec3(2.2)), r);
+                mirror = mix(env, s, edge.x * edge.y);
+            }
+        }
+        float found;
+        vec3 hit = TraceReflection(p + nView * (0.03 * u_metre), rv, Noise(gl_FragCoord.xy), found);
+        mirror = mix(mirror, hit, found);
+    }
+    float sheen = fres * 0.5 * u_wet * ground;
+    reflW = clamp(mix(sheen, fres * 1.15, water) * u_reflect, 0.0, 1.0);
+    refl = mix(env, mirror, water);
+    return c;
+}
+)GLSL" R"GLSL(
 void main()
 {
     vec3 c = pow(max(texture(u_color, v_uv).rgb, vec3(0.0)), vec3(2.2));
@@ -871,17 +1058,11 @@ void main()
     vec3 wp = u_camWrapped + u_viewToWorld * p;
     vec3 dwx = dFdx(wp), dwy = dFdy(wp);
     vec3 dir = u_viewToWorld * normalize(ViewPos(v_uv, 0.5));
+    vec3 rainRefl = vec3(0.0);  // (WEATHER: what wet ground and puddles reflect, and how much)
+    float rainReflW = 0.0;
 
     if (sky) {
-        if (u_tod > 0.5)
-            c = Sky(c, dir);
-        if (u_snow > 0.0) {
-            // Overcast: the blue goes grey, the clouds stay a little lighter, the sun is hidden.
-            float l = Luma(c);
-            vec3 overcast = vec3(l) * vec3(0.93, 0.97, 1.04) * 0.92 + u_snowFog * 0.08;
-            c = mix(c, overcast, 0.85 * u_snow);
-            c = mix(c, u_snowFog, 0.35 * u_snowfall * u_snow * (1.0 - smoothstep(0.0, 0.35, dot(dir, u_up))));
-        }
+        c = SkyLook(c, dir);
     } else {
         float z = -p.z;
         vec3 albedo = c;  // what the headlight lights: the surface before the sun's shadows
@@ -980,6 +1161,10 @@ void main()
             // that is dug into the ground also shows the dirt through the snow.)
             if (u_snow > 0.0 && ground > 0.001)
                 c = Snow(c, wpD, dwx, dwy, nFloor, z, ground, u_marks > 0.0 ? RutStatsAt(pD) : vec2(0.0), snowCover);
+            // (Rain: the soaked dirt and the puddles, on what this pixel shows of the ground too - water
+            // stands in a rut's floor.)
+            if (u_rain > 0.0 && ground > 0.001)
+                c = Rain(c, p, nView, wpD, nWorld, dir, z, ground, u_marks > 0.0 ? RutStatsAt(pD).x : 0.0, rainRefl, rainReflW);
             // (Not tied to the ground mask: when your bike is drawn before the terrain pass ends, the
             // tire is in the terrain's depth too and counted as ground, and its mud came and went.
             // TireDirt keeps to the tire around its own axle.)
@@ -1008,7 +1193,7 @@ void main()
             ao = mix(1.0, ao, u_ao);
             albedo = c * ao;
             // (Overcast in the snow: the sun's shadows fade, the light comes from the whole sky.)
-            c *= ao * mix(1.0, mix(0.42, 1.0, lit), u_shadow * (1.0 - 0.65 * u_snow));
+            c *= ao * mix(1.0, mix(0.42, 1.0, lit), u_shadow * (1.0 - 0.65 * u_overcast));
             // Snow in shade (the sun's shadow, a crease) is lit by the sky alone: cold, blue-grey.
             if (snowCover > 0.0)
                 c *= mix(vec3(1.0), vec3(0.84, 0.92, 1.1),
@@ -1020,16 +1205,131 @@ void main()
             if (u_depthOk > 0.5)
                 c = mix(c, HazeColour(dir), (1.0 - exp(-z / 350.0)) * u_haze);
         }
-        if (u_snow > 0.0) {
-            // A cold, grey day: the colours fade a little, and the falling snow hazes the distance.
-            c = mix(c, vec3(Luma(c)) * vec3(0.96, 0.99, 1.04), 0.25 * u_snow);
+        // (Wet ground and puddles: their reflection, graded already.)
+        if (rainReflW > 0.0)
+            c = mix(c, rainRefl, rainReflW);
+        if (u_overcast > 0.0) {
+            // A cold, grey day: the colours fade a little (and the rain's is darker), and the falling
+            // snow or rain hazes the distance.
+            c = mix(c, vec3(Luma(c)) * vec3(0.96, 0.99, 1.04), 0.25 * u_overcast);
+            c *= 1.0 - 0.15 * u_rain;
             if (u_depthOk > 0.5)
-                c = mix(c, u_snowFog, (1.0 - exp(-z / (90.0 * u_metre))) * 0.7 * u_snowfall * u_snow);
+                c = mix(c, u_weatherFog, (1.0 - exp(-z / (90.0 * u_metre))) * 0.7 * u_weatherHaze * u_overcast);
         }
         if (u_headlight > 0.0)
             c += Headlight(albedo, p, nView);
     }
     o_color = vec4(c, 1.0);
+}
+)GLSL";
+
+// ---- Rainfall (WEATHER): drops around the camera, drawn into the HDR image after the composite ----
+// Like the snowfall (no buffers: each drop is 6 vertices of a quad from gl_VertexID, in a box of
+// u_box that wraps round the camera), but each drop is a streak: where it is now and where it was a
+// moment ago as the camera saw it (its fall less the camera's own motion: riding into the rain
+// tilts the streaks toward you), a thin quad between the two facing the camera. A far drop is kept
+// about a pixel wide, fainter instead of thinner, so it doesn't shimmer.
+constexpr const char* kRainVertex = R"GLSL(
+uniform mat4  u_proj;
+uniform mat3  u_viewRot;     // world -> view (rotation)
+uniform vec3  u_camBox;      // the camera in the box (world, wrapped to it)
+uniform float u_box;         // the box's size, game units
+uniform vec3  u_drift;       // world: how far the rain has fallen, the wind's part too (added up, wrapped)
+uniform vec3  u_streak;      // world: a drop's way in one exposure, seen from the moving camera
+uniform float u_width;       // a drop's half width, game units
+uniform float u_pixel;       // game units per pixel at one unit away
+uniform float u_metre;
+uniform vec3  u_colour;      // a drop's colour, lit as the weather lights the scene
+// Your headlight (view space; as the composite's u_head*[0]): the drops in its beam light up.
+uniform float u_headOn;      // its strength, 0 = off
+uniform vec3  u_headPos, u_headDir, u_headRight, u_headUp;
+uniform vec3  u_headBeam;    // radians: the beam's half-width, the middle of it below level, its half-height
+uniform float u_headReach;
+uniform vec3  u_headColor;
+out vec2  v_corner;
+out float v_alpha;
+out float v_z;
+out vec3  v_light;
+
+uint Hash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+float Random(uint drop, uint k) { return float(Hash(drop * 8u + k) & 0xffffffu) / 16777216.0; }
+
+void main()
+{
+    int drop = gl_VertexID / 6, corner = gl_VertexID - drop * 6;
+    vec2 c = vec2((corner == 1 || corner == 2 || corner == 4) ? 1.0 : -1.0,   // across
+                  (corner == 2 || corner == 4 || corner == 5) ? 1.0 : -1.0);  // along: -1 the tail, 1 the head
+    uint id = uint(drop);
+    vec3 at = vec3(Random(id, 0u), Random(id, 1u), Random(id, 2u)) * u_box + u_drift;
+    vec3 rel = (fract((at - u_camBox) / u_box + 0.5) - 0.5) * u_box;  // the nearest copy, around the camera
+    vec3 head = u_viewRot * rel;
+    vec3 tail = u_viewRot * (rel - u_streak * (0.7 + 0.6 * Random(id, 3u)));
+    vec3 axis = head - tail, mid = 0.5 * (head + tail);
+    vec3 side = cross(axis, mid);
+    float sl = length(side);
+    side = sl > 1e-6 ? side / sl : vec3(1.0, 0.0, 0.0);
+    float z = -mid.z;
+    float shown = max(u_width, 0.6 * u_pixel * max(z, 0.0));
+    v_alpha = (0.3 + 0.25 * Random(id, 4u)) * sqrt(u_width / shown)
+            * smoothstep(0.35 * u_metre, 1.2 * u_metre, z)                    // not right in front of the lens
+            * (1.0 - smoothstep(0.38 * u_box, 0.5 * u_box, length(rel)));   // nor where the box wraps
+    float al = length(axis);
+    vec3 along = al > 1e-6 ? axis / al : vec3(0.0, 1.0, 0.0);
+    vec3 v = (c.y > 0.0 ? head : tail) + side * (c.x * shown) + along * (c.y * shown);
+    // In your headlight's beam (as the composite's HeadlightOne, the cone seen from the plate, and the
+    // glow around it - a real lamp's light spills past its beam's edge, and rain shows it): lit up,
+    // bright near the bike, fading with the distance.
+    v_light = u_colour;
+    if (u_headOn > 0.0) {
+        vec3 q = mid - u_headPos;
+        float d = length(q), ahead = dot(q, u_headDir);
+        if (ahead > 0.0 && d < 70.0 * u_headReach) {
+            float sideA = atan(dot(q, u_headRight), ahead);
+            float downA = atan(-dot(q, u_headUp), ahead);
+            vec2 e = vec2(sideA / u_headBeam.x, (downA - u_headBeam.y) / u_headBeam.z);
+            float cone = smoothstep(1.0, 0.45, length(e)) + 0.5 * smoothstep(2.2, 0.8, length(e));
+            float reach = 1.0 / (1.0 + d * d / (144.0 * u_headReach * u_headReach));
+            v_light += u_headColor * (cone * reach * smoothstep(0.5 * u_metre, 1.5 * u_metre, d) * u_headOn * 4.0);
+        }
+    }
+    v_corner = c;
+    v_z = -v.z;
+    gl_Position = u_proj * vec4(v, 1.0);
+}
+)GLSL";
+
+constexpr const char* kRainFragment = R"GLSL(
+uniform sampler2D u_depth;   // the scene's
+uniform mat4  u_invProj;
+uniform vec2  u_texel;
+uniform float u_metre;
+in vec2  v_corner;
+in float v_alpha;
+in float v_z;
+in vec3  v_light;            // its colour, lit by the weather (and your headlight)
+out vec4 o_color;
+
+void main()
+{
+    if (v_alpha < 0.002)
+        discard;
+    float across = 1.0 - v_corner.x * v_corner.x;
+    float along = smoothstep(-1.0, 0.1, v_corner.y) * (1.0 - smoothstep(0.8, 1.0, v_corner.y));  // its tail fainter
+    float d = texture(u_depth, gl_FragCoord.xy * u_texel).r;
+    float seen = 1.0;
+    if (d < 0.999999) {
+        float n = d * 2.0 - 1.0;
+        float sceneZ = -(u_invProj[2][2] * n + u_invProj[3][2]) / (u_invProj[2][3] * n + u_invProj[3][3]);
+        seen = clamp((sceneZ - v_z) / (0.1 * u_metre + 0.02 * v_z), 0.0, 1.0);  // softly behind what's nearer
+    }
+    float a = across * along * v_alpha * seen;
+    o_color = vec4(v_light * a, a);  // premultiplied
 }
 )GLSL";
 

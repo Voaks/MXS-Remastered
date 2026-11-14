@@ -134,7 +134,18 @@ struct Config {
     double headlightAimDeg  = 0.0;        // where the beam's top edge is aimed, degrees above level (up: it
                                           // reaches further ahead; down: nearer)
     // WEATHER (postfx: the composite pass and the snowfall pass)
-    bool   rain             = false;      // (coming soon: only a placeholder row in the menu, never read or saved)
+    bool   rain             = false;      // rain: drops falling around you, wet ground and bikes, puddles, a
+                                          // dark overcast sky (postfx: the composite, the rainfall pass; the
+                                          // bike shader's wet shine, proc_hooks PaintWet)
+    double rainfall         = 0.6;        // 0..1 how hard it rains (the drops around you, the ripples in the
+                                          // puddles, the haze in the distance); 0: wet, nothing falling
+    double rainWind         = 0.15;       // 0..1 how hard the wind blows the rain sideways
+    double wetness          = 0.75;       // 0..1 how wet everything looks: darker dirt, and the shine on the
+                                          // ground, the bikes and the riders
+    double puddles          = 0.5;        // 0..1 how much standing water: puddles on the flat ground, water in
+                                          // the deepest ruts
+    double rainReflections  = 0.8;        // 0..1 how strongly the puddles and wet surfaces reflect (the sky,
+                                          // and what's on screen: bikes, trees, the track's banners)
     bool   snow             = false;      // snow on the ground (terrain only; your ruts dig through it to the
                                           // dirt) and an overcast sky; off = no weather
     double snowfall         = 0.5;        // 0..1 how heavily it falls (flakes around you, and the haze they make)

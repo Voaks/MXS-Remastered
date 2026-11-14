@@ -12,6 +12,8 @@
 //     dirt      dirt detail only: the ground gets detail, the object and the sky don't
 //     night     TimeOfDay=0: dark ground, a night sky, the HUD untouched, the sun turned
 //     snow      WEATHER Snow=1, Snowfall=1: white ground (the object isn't), a grey sky, flakes falling
+//     rain      WEATHER Rain=1 at 100%: a dark grey sky, drops falling, the ground darker (wet), puddles that
+//               reflect, and the object's shader carrying the wet shine (rainperf / snowperf0: timing)
 //     shadows   screen-space sun shadows only: the object shades the ground beside it
 //     offscreen shadow maps: a tower behind the camera shades the ground in view
 //     stadium   the same under a roof 120 m across: the roof is left out, the ground stays sunny
@@ -134,7 +136,7 @@ const char* const kBikeVertex =
     "\tinterp_texcoord = vattr_texcoord;\n"
     "\tinterp_normal = vec3(0.0, 0.0, 1.0);\n"
     "\tinterp_tangent = vec3(1.0, 0.0, 0.0);\n"
-    "\tinterp_viewer = vec3(0.0);\n"
+    "\tinterp_viewer = (u_modelview * vec4(vattr_position, 1.0)).xyz;\n"
     "\tgl_Position = u_projection * (u_modelview * vec4(vattr_position, 1.0)) + vec4(u_bone_t[0] * 0.0, 0.0) * float(u_nbones);\n"
     "}\n";
 const char* const kBikeFragment =
@@ -146,10 +148,12 @@ const char* const kBikeFragment =
     "uniform vec3 u_light_position;\n"
     "uniform vec4 u_ambient;\n"
     "uniform vec3 u_diffuse;\n"
+    "uniform float u_shininess;\n"
+    "uniform vec3 u_specular_color;\n"
     "out vec4 f_fragcolor;\n"
     "void main()\n"
     "{\n"
-    "\tvec4 color;\n"
+    "\tvec4 color, s;\n"
     "\tvec3 n, light;\n"
     "\tfloat ndl, z;\n"
     "\tlight = u_light_position;\n"
@@ -160,6 +164,12 @@ const char* const kBikeFragment =
     "\t\tndl = 0.0;\n"
     "\tcolor.rgb += u_diffuse.rgb * ndl;\n"
     "\tcolor *= texture(u_tex, interp_texcoord);\n"
+    "\ts = texture(u_smap, interp_texcoord);\n"
+    "\ts.rgb *= u_specular_color;\n"
+    "\ts.a = s.a * 128.0 + 0.125;\n"
+    "\tif (s.a >= 127.875)\n"
+    "\t\ts.a = u_shininess;\n"
+    "\tcolor.rgb += s.rgb * pow(max(dot(reflect(normalize(interp_viewer), n), light), 1e-4), max(s.a, 1.0));\n"
     "\tz = gl_FragCoord.z / gl_FragCoord.w;\n"
     "\tf_fragcolor = color;\n"
     "}\n";
@@ -290,6 +300,9 @@ int main(int argc, char** argv)
         settings = base.replace(base.find("TimeOfDay=-1"), 12, "TimeOfDay=0");
     else if (mode == "snow" || mode == "snowperf")
         settings = base + "[Weather]\nSnow=1\nSnowfall=1\nWind=0.3\n";
+    else if (mode == "rain" || mode == "rainperf")
+        settings = base + "[Weather]\nRain=1\nRainfall=1\nRainWind=0.3\nWetness=0.8\nPuddles=" +
+                   std::string(getenv("MXCAM_TEST_PUDDLES") ? getenv("MXCAM_TEST_PUDDLES") : "0.8") + "\nReflections=1\n";
     else if (mode == "snowperf0")  // timing: the same scene without the weather
         settings = base;
     else if (mode == "shadows")  // screen-space shadows alone
@@ -399,7 +412,7 @@ int main(int argc, char** argv)
     }
     // Timing: not held to the screen's refresh (every frame took exactly 1 / refresh otherwise).
     if (mode == "shadowperf" || mode == "shadowperf0" || mode == "snowperf" || mode == "snowperf0" || mode == "dirtperf" ||
-        mode == "ultraperf") {
+        mode == "ultraperf" || mode == "rainperf") {
         using PFN_SwapInterval = BOOL(WINAPI*)(int);
         if (const auto swapInterval = reinterpret_cast<PFN_SwapInterval>(p_wglGetProcAddress("wglSwapIntervalEXT")))
             swapInterval(0);
@@ -562,7 +575,8 @@ int main(int argc, char** argv)
     if (mode == "backshadow")  // looking down at the bike from above, to see its shadow
         MakeView(0, 26.0f, 0, 58.0f, 0.0f, view);
     else  // (MXCAM_TEST_CAM_X moves it sideways: the ground's patterns must stay where the world has them)
-        MakeView(getenv("MXCAM_TEST_CAM_X") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_X"))) : 0.0f, 1.6f, 0, 12.0f, 0.0f, view);
+        MakeView(getenv("MXCAM_TEST_CAM_X") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_X"))) : 0.0f, 1.6f,
+                 getenv("MXCAM_TEST_CAM_Z") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_Z"))) : 0.0f, 12.0f, 0.0f, view);
     // What the game sends (eye space, toward the sun). For the shadow check: from the right, so
     // the box's shadow falls on the ground to its left.
     // For the shadow map check: low, from behind, so a tower behind the camera (never on screen)
@@ -658,7 +672,8 @@ int main(int argc, char** argv)
     };
 
     const bool snowTiming = mode == "snowperf" || mode == "snowperf0" ||  // timing: snow at 100% / off,
-                            mode == "dirtperf" || mode == "ultraperf";    // the dirt detail, without and with Ultra
+                            mode == "dirtperf" || mode == "ultraperf" ||  // the dirt detail, without and with Ultra,
+                            mode == "rainperf";                           // rain at 100%
     const bool timing = mode == "shadowperf" || mode == "shadowperf0" || snowTiming;
     const bool hiddenWheels = mode == "tireshidden";
     // gatebox: the same bike, standing still for 3.4 s beside a box the game then stops drawing (like
@@ -1302,6 +1317,49 @@ int main(int argc, char** argv)
         Check(log.find("postfx: snowfall ready") != std::string::npos && log.find("snowfall couldn't be built") == std::string::npos,
               "the snowfall's shaders compile");
         Check(log.find("shader failed") == std::string::npos, "every effect's shader compiles with the snow in it");
+    } else if (mode == "rain") {
+        printf("    ground %d %d %d (drawn %d %d %d), sky %d %d %d, box %d %d %d\n", ground.r, ground.g, ground.b,
+               drawnGround.r, drawnGround.g, drawnGround.b, sky.r, sky.g, sky.b, box.r, box.g, box.b);
+        Check(std::abs(sky.b - sky.r) < std::abs(drawnSky.b - drawnSky.r) / 2, "the sky is overcast grey");
+        Check(sky.r + sky.g + sky.b < drawnSky.r + drawnSky.g + drawnSky.b, "and darker than a clear one");
+        // Drops: across the sky, pixels lighter than the sky a little above or below them.
+        int drops = 0;
+        for (int y = 10; y < 110; ++y)
+            for (int x = 0; x < W; x += 1) {
+                const Pixel q = At(x, y), r = At(x, y > 60 ? y - 12 : y + 12);
+                drops += q.r > r.r + 6 && q.b > r.b + 6 ? 1 : 0;
+            }
+        printf("    %d raindrop pixels in the sky\n", drops);
+        Check(drops > 30, "rain is falling (streaks against the sky)");
+        // The ground: darker where it's soaked, and over the near ground a spread of lighter
+        // (reflecting) puddles and darker wet dirt.
+        int darker = 0, lighter = 0, count = 0;
+        for (int y = 300; y < H - 10; y += 2)
+            for (int x = 10; x < W - 10; x += 2) {
+                if (x > W / 2 - 120 && x < W / 2 + 120 && y < 360)
+                    continue;  // (the box)
+                const Pixel q = At(x, y);
+                ++count;
+                darker += q.r + q.g + q.b < drawnGround.r + drawnGround.g + drawnGround.b - 40 ? 1 : 0;
+                lighter += q.r + q.g + q.b > drawnGround.r + drawnGround.g + drawnGround.b - 10 ? 1 : 0;
+            }
+        printf("    near ground: %d%% darker (wet), %d%% about as light or lighter (puddles reflecting)\n",
+               darker * 100 / count, lighter * 100 / count);
+        Check(darker * 100 / count > 30, "the ground is darker: wet");
+        Check(lighter > 50, "puddles reflect the sky");
+        std::string log;
+        FILE* in = _wfsopen((dir + L"MXS_REMASTERED.log").c_str(), L"rb", _SH_DENYNO);
+        if (in) {
+            char buffer[4096];
+            size_t got;
+            while ((got = fread(buffer, 1, sizeof buffer, in)) > 0)
+                log.append(buffer, got);
+            fclose(in);
+        }
+        Check(log.find("postfx: rainfall ready") != std::string::npos && log.find("rainfall couldn't be built") == std::string::npos,
+              "the rainfall's shaders compile");
+        Check(log.find("carries the wet shine") != std::string::npos, "the bike shader carries the wet shine");
+        Check(log.find("shader failed") == std::string::npos, "every effect's shader compiles with the rain in it");
     } else if (mode == "night") {
         // Corners on both sides of the screen's diagonals: every pass must cover the whole window.
         const Pixel skyLeft = At(20, 20), skyRight = At(W - 20, 20), groundLeft = At(20, H - 20), groundRight = At(W - 20, H - 20);
@@ -1452,7 +1510,8 @@ int main(int argc, char** argv)
     } else if (snowTiming) {
         printf("    %s: %.3f ms per frame (%d frames)\n",
                mode == "snowperf" ? "snow at 100%, snowfall 100%" : mode == "snowperf0" ? "snow off"
-               : mode == "dirtperf" ? "dirt detail" : "dirt detail with Ultra graphics",
+               : mode == "dirtperf" ? "dirt detail" : mode == "rainperf" ? "rain at 100%, puddles 80%"
+               : "dirt detail with Ultra graphics",
                timedMs / timedFrames, timedFrames);
     } else if (timing) {
         printf("    %s: %.3f ms per frame with 800 shadow casters (%d frames)\n",

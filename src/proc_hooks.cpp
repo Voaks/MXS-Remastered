@@ -2011,7 +2011,36 @@ constexpr char kMudFragmentApply[] =
     "\t\t}\n"
     "\t\tcolor.rgb = mix(color.rgb, mx_mud * (u_ambient.rgb + u_diffuse.rgb * ndl), mx_cover);\n"
     "\t}\n";
+// WEATHER: the rain's wet shine, in the same shader (after the mud: mud gets wet too), on whatever it
+// draws - bikes, riders, their gear - while u_mx_wet is set (PaintWet: while it rains). Darker, cloth
+// most of all; a coat of water over it reflecting the overcast sky above and the ground below,
+// strongest at a glance (Fresnel), more on the glossy parts (the game's own shininess there: plastic,
+// paint, metal) than on cloth; a soft highlight where the sky is brightest; and beads of water over
+// the surface, on its own model (they stay put as it moves), faded out where they'd be under a pixel.
+constexpr char kWetFragmentDecl[] =
+    "uniform float u_mx_wet;\n"
+    "uniform float u_mx_shine;\n"
+    "uniform vec3 u_mx_sky;\n"
+    "uniform vec3 u_mx_ground;\n"
+    "uniform vec3 u_mx_up;\n";
+constexpr char kWetFragmentApply[] =
+    "\tif (u_mx_wet > 0.0) {\n"
+    "\t\tvec3 mx_v = normalize(interp_viewer);\n"
+    "\t\tvec3 mx_r = reflect(mx_v, n);\n"
+    "\t\tfloat mx_gloss = smoothstep(6.0, 40.0, s.a);\n"
+    "\t\tfloat mx_f = 0.04 + 0.96 * pow(1.0 - clamp(dot(-mx_v, n), 0.0, 1.0), 5.0);\n"
+    "\t\thighp vec3 mx_b = mx_pos * (55.0 / u_mx_metre);\n"
+    "\t\tfloat mx_fade = 1.0 - smoothstep(0.35, 0.9, length(fwidth(mx_b)));\n"
+    "\t\tfloat mx_bead = smoothstep(0.72, 0.8, mx_noise(mx_b)) * mx_fade;\n"
+    "\t\tvec3 mx_env = mix(u_mx_ground, u_mx_sky, smoothstep(-0.35, 0.45, dot(mx_r, u_mx_up)));\n"
+    "\t\tcolor.rgb *= 1.0 - u_mx_wet * mix(0.32, 0.12, mx_gloss);\n"
+    "\t\tfloat mx_coat = u_mx_wet * u_mx_shine * mix(0.12, 1.0, mx_gloss);\n"
+    "\t\tcolor.rgb += mx_env * (mx_f * mx_coat);\n"
+    "\t\tcolor.rgb += u_mx_sky * (pow(max(dot(mx_r, light), 0.0), 48.0) * 0.5 * mx_coat);\n"
+    "\t\tcolor.rgb += u_mx_sky * (mx_bead * 0.35 * u_mx_wet * u_mx_shine * (0.5 + 0.5 * max(dot(n, u_mx_up), 0.0)));\n"
+    "\t}\n";
 bool g_loggedMudShader[2] = { false, false };
+bool g_loggedWetShader = false;
 
 // Whether the changed source compiles (on a shader of our own; the game's is untouched until then).
 bool CompilesAs(GLenum type, const std::string& source)
@@ -2064,6 +2093,27 @@ std::string MudShader(GLuint shader, const std::string& source)
     GLint type = vertex ? 0x8B31 : 0x8B30;  // GL_VERTEX_SHADER / GL_FRAGMENT_SHADER
     if (get)
         get(shader, 0x8B4F /* GL_SHADER_TYPE */, &type);
+    // The rain's wet shine too, in a fragment shader with what it needs (the viewer, the game's
+    // shininess): tried first; if that doesn't compile, the mud alone.
+    if (!vertex && source.find("in vec3 interp_normal, interp_tangent, interp_viewer;") != std::string::npos &&
+        source.find("s.a = s.a * 128.0 + 0.125;") != std::string::npos) {
+        std::string wet = changed;
+        wet.insert(wet.find("out vec4 f_fragcolor;") + strlen("out vec4 f_fragcolor;") + 1, kWetFragmentDecl);
+        wet.insert(wet.find("\tz = gl_FragCoord.z / gl_FragCoord.w;"), kWetFragmentApply);
+        const bool wetOk = CompilesAs(static_cast<GLenum>(type), wet);
+        if (!g_loggedWetShader) {
+            g_loggedWetShader = true;
+            Log("rain: the bike's fragment shader %s", wetOk ? "carries the wet shine (bikes, riders and gear in the rain)"
+                                                             : "didn't compile with the wet shine: the mud alone, no wet shine");
+        }
+        if (wetOk) {
+            if (!g_loggedMudShader[1]) {
+                g_loggedMudShader[1] = true;
+                Log("tire dirt: the bike's fragment shader carries the tire dirt (drawn on your tires themselves)");
+            }
+            return wet;
+        }
+    }
     const bool ok = CompilesAs(static_cast<GLenum>(type), changed);
     bool& logged = g_loggedMudShader[vertex ? 0 : 1];
     if (!logged) {
@@ -3513,6 +3563,58 @@ void PaintTireDirt(const DrawCall& draw)
     }
 }
 
+// WEATHER: the rain's wet shine (kWetFragmentApply) on every draw of a program that carries it, while
+// it rains: its amount when that changes, the sky it reflects and the view's up once a frame.
+struct WetProgram {
+    bool     looked = false;
+    GLint    wet = -1, shine = -1, sky = -1, ground = -1, up = -1, metre = -1;
+    float    set = 0.0f;
+    unsigned frame = 0;
+};
+std::unordered_map<GLuint, WetProgram> g_wetPrograms;
+
+void PaintWet()
+{
+    if (!g_program || !real_glUniform1f || !real_glUniform3fv)
+        return;
+    WetProgram& w = g_wetPrograms[g_program];
+    if (!w.looked) {
+        w.looked = true;
+        if (real_glGetUniformLocation) {
+            w.wet = real_glGetUniformLocation(g_program, "u_mx_wet");
+            if (w.wet >= 0) {
+                w.shine = real_glGetUniformLocation(g_program, "u_mx_shine");
+                w.sky = real_glGetUniformLocation(g_program, "u_mx_sky");
+                w.ground = real_glGetUniformLocation(g_program, "u_mx_ground");
+                w.up = real_glGetUniformLocation(g_program, "u_mx_up");
+                w.metre = real_glGetUniformLocation(g_program, "u_mx_metre");
+            }
+        }
+    }
+    if (w.wet < 0)
+        return;
+    postfx::WetLook look;
+    const float want = postfx::GetWetLook(look) ? look.wet : 0.0f;
+    if (want != w.set) {
+        real_glUniform1f(w.wet, want);
+        w.set = want;
+        w.frame = 0;  // (the rest again with it)
+    }
+    if (want <= 0.0f || w.frame == g_frameNumber)
+        return;
+    w.frame = g_frameNumber;
+    if (w.shine >= 0)
+        real_glUniform1f(w.shine, look.shine);
+    if (w.sky >= 0)
+        real_glUniform3fv(w.sky, 1, look.sky);
+    if (w.ground >= 0)
+        real_glUniform3fv(w.ground, 1, look.ground);
+    if (w.up >= 0)
+        real_glUniform3fv(w.up, 1, look.up);
+    if (w.metre >= 0)
+        real_glUniform1f(w.metre, static_cast<float>(g_paintUnits));
+}
+
 void DrawWheelMasks(const postfx::OwnAnchors* own)
 {
     ++g_memberFrame;
@@ -4214,6 +4316,7 @@ bool NoteDraw(const DrawCall& draw)
             postfx::NoteCastNowMs(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - castStart).count());
         }
         PaintTireDirt(draw);
+        PaintWet();
         return true;
     }
     const auto found = g_elementBuffers.find(g_vao);
