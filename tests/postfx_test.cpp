@@ -282,8 +282,10 @@ int main(int argc, char** argv)
         settings = "[Graphics]\nShaders=0\n";
     else if (mode == "neutral")
         settings = base;
-    else if (mode == "dirt")
+    else if (mode == "dirt" || mode == "dirtperf")
         settings = base.replace(base.find("DirtDetail=0"), 12, "DirtDetail=1");
+    else if (mode == "dirtultra" || mode == "ultraperf")  // the same, with Ultra graphics
+        settings = base.replace(base.find("DirtDetail=0"), 12, "DirtDetail=1\nUltraGraphics=1");
     else if (mode == "night")
         settings = base.replace(base.find("TimeOfDay=-1"), 12, "TimeOfDay=0");
     else if (mode == "snow" || mode == "snowperf")
@@ -396,7 +398,8 @@ int main(int argc, char** argv)
         return 1;
     }
     // Timing: not held to the screen's refresh (every frame took exactly 1 / refresh otherwise).
-    if (mode == "shadowperf" || mode == "shadowperf0" || mode == "snowperf" || mode == "snowperf0") {
+    if (mode == "shadowperf" || mode == "shadowperf0" || mode == "snowperf" || mode == "snowperf0" || mode == "dirtperf" ||
+        mode == "ultraperf") {
         using PFN_SwapInterval = BOOL(WINAPI*)(int);
         if (const auto swapInterval = reinterpret_cast<PFN_SwapInterval>(p_wglGetProcAddress("wglSwapIntervalEXT")))
             swapInterval(0);
@@ -558,8 +561,8 @@ int main(int argc, char** argv)
     float view[16];
     if (mode == "backshadow")  // looking down at the bike from above, to see its shadow
         MakeView(0, 26.0f, 0, 58.0f, 0.0f, view);
-    else
-        MakeView(0, 1.6f, 0, 12.0f, 0.0f, view);
+    else  // (MXCAM_TEST_CAM_X moves it sideways: the ground's patterns must stay where the world has them)
+        MakeView(getenv("MXCAM_TEST_CAM_X") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_X"))) : 0.0f, 1.6f, 0, 12.0f, 0.0f, view);
     // What the game sends (eye space, toward the sun). For the shadow check: from the right, so
     // the box's shadow falls on the ground to its left.
     // For the shadow map check: low, from behind, so a tower behind the camera (never on screen)
@@ -654,7 +657,8 @@ int main(int argc, char** argv)
         }
     };
 
-    const bool snowTiming = mode == "snowperf" || mode == "snowperf0";  // timing: snow at 100% / off
+    const bool snowTiming = mode == "snowperf" || mode == "snowperf0" ||  // timing: snow at 100% / off,
+                            mode == "dirtperf" || mode == "ultraperf";    // the dirt detail, without and with Ultra
     const bool timing = mode == "shadowperf" || mode == "shadowperf0" || snowTiming;
     const bool hiddenWheels = mode == "tireshidden";
     // gatebox: the same bike, standing still for 3.4 s beside a box the game then stops drawing (like
@@ -1199,6 +1203,18 @@ int main(int argc, char** argv)
             ++count;
         }
     const double mean = sum / count, spread = std::sqrt(std::fmax(sumSq / count - mean * mean, 0.0));
+    // And over ground further out (a band a little below the horizon): what Ultra graphics reaches.
+    double farSum = 0, farSumSq = 0;
+    int farCount = 0;
+    for (int y = 188; y < 212; ++y)
+        for (int x = 20; x < W / 2 - 80; ++x) {  // (left of the box)
+            const Pixel q = At(x, y);
+            farSum += q.r;
+            farSumSq += double(q.r) * q.r;
+            ++farCount;
+        }
+    const double farMean = farSum / farCount, farSpread = std::sqrt(std::fmax(farSumSq / farCount - farMean * farMean, 0.0));
+    printf("    far ground red %.1f +- %.2f\n", farMean, farSpread);
     printf("    sky %d %d %d, ground %d %d %d, box %d %d %d, HUD %d %d %d; near ground red %.1f +- %.2f\n", sky.r, sky.g,
            sky.b, ground.r, ground.g, ground.b, box.r, box.g, box.b, hudPixel.r, hudPixel.g, hudPixel.b, mean, spread);
 
@@ -1253,8 +1269,10 @@ int main(int argc, char** argv)
               Near(At(20, H - 20), drawnGround, tolerance) && Near(At(W - 20, H - 20), drawnGround, tolerance),
               mode == "off" ? "shaders off: the picture is exactly what was drawn"
                             : "every effect at zero: the pipeline gives the picture back unchanged");
-    } else if (mode == "dirt") {
+    } else if (mode == "dirt" || mode == "dirtultra") {
         Check(spread > 2.0, "the near ground has detail");
+        if (mode == "dirtultra")
+            Check(farSpread > 3.0, "Ultra graphics: the ground further out has detail too");
         Check(Near(box, drawnBox, 2), "the object is left alone (the ground mask works)");
         Check(Near(sky, drawnSky, 2), "the sky is left alone");
     } else if (mode == "snow") {
@@ -1432,7 +1450,9 @@ int main(int argc, char** argv)
         Check(underPlate.r > 60, "the light starts right in front of the plate");
         Check(aside.r < 45, "a narrow beam is skinnier");
     } else if (snowTiming) {
-        printf("    snow %s: %.3f ms per frame (%d frames)\n", mode == "snowperf" ? "at 100%, snowfall 100%" : "off",
+        printf("    %s: %.3f ms per frame (%d frames)\n",
+               mode == "snowperf" ? "snow at 100%, snowfall 100%" : mode == "snowperf0" ? "snow off"
+               : mode == "dirtperf" ? "dirt detail" : "dirt detail with Ultra graphics",
                timedMs / timedFrames, timedFrames);
     } else if (timing) {
         printf("    %s: %.3f ms per frame with 800 shadow casters (%d frames)\n",

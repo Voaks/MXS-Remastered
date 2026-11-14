@@ -5337,6 +5337,37 @@ void Render(int w, int h)
         g_gl.Uniform1f(p["u_shadow"], static_cast<float>(shadowAmount));
         g_gl.Uniform1f(p["u_dirt"], static_cast<float>(cfg.dirtDetail));
         g_gl.Uniform1f(p["u_dirtScale"], static_cast<float>(cfg.dirtScale));
+        g_gl.Uniform1f(p["u_ultra"], cfg.ultraGraphics ? 1.0f : 0.0f);
+        // The ground's patterns' frequencies (per game unit), in the shader's kPattern* order, and
+        // each one's phase at the camera, in double: its whole part and its fraction (see
+        // postfx_shaders.h, u_freq). Taken from the wrapped camera, the patterns jumped every 64 units.
+        {
+            const double ds = cfg.dirtScale > 0.0 ? cfg.dirtScale : 1.0, m = g_unitsPerMetre;
+            const double freqs[] = { 0.6 / ds, 2.6 / ds, 0.16 / ds, 0.012 / ds, 0.0035 / ds, 5.2 / ds,
+                                     30.0 / m, 40.0 / m, 0.3 / m, 1.6 / m, 5.0 / m };
+            static const char* const kFreq[] = { "u_freq[0]", "u_freq[1]", "u_freq[2]", "u_freq[3]", "u_freq[4]", "u_freq[5]",
+                                                 "u_freq[6]", "u_freq[7]", "u_freq[8]", "u_freq[9]", "u_freq[10]" };
+            static const char* const kWhole[] = { "u_phaseI[0]", "u_phaseI[1]", "u_phaseI[2]", "u_phaseI[3]", "u_phaseI[4]",
+                                                  "u_phaseI[5]", "u_phaseI[6]", "u_phaseI[7]", "u_phaseI[8]", "u_phaseI[9]",
+                                                  "u_phaseI[10]" };
+            static const char* const kFraction[] = { "u_phaseF[0]", "u_phaseF[1]", "u_phaseF[2]", "u_phaseF[3]", "u_phaseF[4]",
+                                                     "u_phaseF[5]", "u_phaseF[6]", "u_phaseF[7]", "u_phaseF[8]", "u_phaseF[9]",
+                                                     "u_phaseF[10]" };
+            static_assert(sizeof freqs / sizeof freqs[0] == 11, "postfx_shaders.h: u_freq[11]");
+            const double at[3] = { eye.x, eye.y, eye.z };
+            for (int k = 0; k < 11; ++k) {
+                double whole[3], fraction[3];
+                for (int a = 0; a < 3; ++a) {
+                    const double phase = at[a] * freqs[k];
+                    whole[a] = std::floor(phase);
+                    fraction[a] = phase - whole[a];
+                }
+                g_gl.Uniform1f(p[kFreq[k]], static_cast<float>(freqs[k]));
+                g_gl.Uniform3f(p[kWhole[k]], static_cast<float>(whole[0]), static_cast<float>(whole[1]), static_cast<float>(whole[2]));
+                g_gl.Uniform3f(p[kFraction[k]], static_cast<float>(fraction[0]), static_cast<float>(fraction[1]),
+                               static_cast<float>(fraction[2]));
+            }
+        }
         g_gl.Uniform1f(p["u_haveTerrain"], g_frame.terrainSnapshot ? 1.0f : 0.0f);
         g_gl.UniformMatrix3fv(p["u_viewToWorld"], 1, GL_FALSE, viewToWorld);
         Vec(p, "u_camWrapped", camWrapped);

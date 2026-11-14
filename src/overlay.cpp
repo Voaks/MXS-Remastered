@@ -1432,6 +1432,11 @@ const RowDef kRows[] = {
         .Help("Turns every effect on this tab on or off (its key is on the KEYBINDS tab). Off is the game "
               "exactly as it looks without the mod.")
         .Col(0),
+    Toggle(kTabGraphics, nullptr,           "Ultra graphics",       &Config::ultraGraphics)
+        .Help("More detail in the ground: the dirt's grain and clods reach five times further out, its "
+              "bumps catch the sun more strongly, and the track gets patches of lighter, drier and darker, "
+              "richer dirt across it, like real ground. Builds on Dirt detail (GROUND & TIRES). Made to "
+              "cost about what Dirt detail alone always did."),
     Slider(kTabGraphics, "TIME OF DAY",     "Time of day",          &Config::timeOfDay,        -1.0,  24.0,  0.25,   1.0,    0, "", "Game")
         .Clock()
         .Help("Sets the hour: the sun moves across the sky, sunsets turn the light orange, and at "
@@ -1571,9 +1576,9 @@ const RowDef kRows[] = {
     Slider(kTabReplay, nullptr,           "Mount out",            &Config::sideOut,          0.0,   1.5,   0.01,   1.0,    2, " m")
         .Help("Side-mounted helmet replays: how far out to the side of the head the camera sits. Raise "
               "it if the camera ends up inside the helmet."),
-    Slider(kTabReplay, nullptr,           "Tilt",                 &Config::helmetTiltDeg,    -10.0, 60.0,  0.5,    1.0,    1, "\xB0")
+    Slider(kTabReplay, nullptr,           "Tilt",                 &Config::helmetTiltDeg,    -30.0, 60.0,  0.5,    1.0,    1, "\xB0")
         .Side(&Config::sideTiltDeg).Chest(&Config::chestTiltDeg)
-        .Help("Helmet replays: how far the camera is angled down from where the helmet faces. More "
+        .Help("Helmet replays: how far the camera is angled down from where the helmet faces (below 0, up). More "
               "shows more of the bars and the bike, less shows more of the track ahead."),
     Slider(kTabReplay, nullptr,           "Stabilization",        &Config::helmetSmoothing,  0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
         .Help("Helmet replays: smooths the camera's rotation, like a GoPro's stabilization. Off shakes "
@@ -2467,6 +2472,8 @@ bool RowInactive(const RowDef& def, const Config& cfg)
             return true;
         if (def.flag == &Config::moveSun || def.flag == &Config::hideGameFlare || def.number == &Config::nightBrightness)
             return cfg.timeOfDay < 0;
+        if (def.flag == &Config::ultraGraphics)  // (it builds on the dirt detail)
+            return cfg.dirtDetail <= 0;
         if (def.number == &Config::shadowLength)  // (screen-space: only without the shadow map)
             return cfg.shadows <= 0 || cfg.shadowMap;
         if (def.flag == &Config::shadowMap)

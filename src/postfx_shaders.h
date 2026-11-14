@@ -170,6 +170,16 @@ uniform float u_ao;
 uniform float u_shadow;
 uniform float u_dirt;
 uniform float u_dirtScale;
+uniform float u_ultra;          // Config::ultraGraphics: the ground's detail further out, stronger, with patches
+// The ground's patterns are laid over the world at fixed frequencies (per game unit): the detail
+// texture's scales and the procedural noises (kPattern* below, postfx.cpp's kPatterns). The
+// world position the shader has is the camera's wrapped every 64 units (float precision) plus the
+// pixel's offset from it, and a pattern's phase can't be taken from that: it jumped at every wrap,
+// the whole ground's texture changing under you every 20 m. Each pattern's phase at the camera's
+// true position comes from the CPU instead, in double precision, as its whole part and fraction.
+uniform float u_freq[11];
+uniform vec3  u_phaseI[11];
+uniform vec3  u_phaseF[11];
 uniform float u_haveTerrain;
 uniform sampler2D u_markMap;    // tire marks on the ground (see postfx.cpp: TireMarks)
 uniform float u_marks;          // 0 = off
@@ -350,48 +360,114 @@ vec2 LightAt(vec2 uv, float z)
     return sum / max(total, 1e-4);
 }
 
-// Fine detail laid over the ground in world space (triplanar, two scales), lit by the sun.
+)GLSL" R"GLSL(
+// Which pattern (u_freq / u_phase*).
+const int kPatternDirt = 0, kPatternDirtFine = 1, kPatternClods = 2, kPatternPatches = 3, kPatternPatchesWide = 4,
+          kPatternRutFloor = 5, kPatternRutClods = 6, kPatternRutCrumbs = 7, kPatternDrifts = 8, kPatternDriftsFine = 9,
+          kPatternSnow = 10;
+
+// wp (the shader's world position: the wrapped camera plus the pixel's offset) times pattern k's
+// frequency: its fraction-carrying part, small and exact - the pixel's offset scaled, plus the
+// fraction of the camera's own. The whole part is u_phaseI[k] (add it for the full value).
+vec3 PatternPos(vec3 wp, int k) { return (wp - u_camWrapped) * u_freq[k] + u_phaseF[k]; }
+
+// Value noise of pattern k at wp, its lattice where the world's is (the camera's whole part added
+// back after floor, exactly).
+float PatternNoise(vec3 wp, int k)
+{
+    vec3 q = PatternPos(wp, k);
+    vec3 i = floor(q) + u_phaseI[k], f = fract(q);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = mix(Hash13(i), Hash13(i + vec3(1, 0, 0)), f.x);
+    float b = mix(Hash13(i + vec3(0, 1, 0)), Hash13(i + vec3(1, 1, 0)), f.x);
+    float c = mix(Hash13(i + vec3(0, 0, 1)), Hash13(i + vec3(1, 0, 1)), f.x);
+    float d = mix(Hash13(i + vec3(0, 1, 1)), Hash13(i + vec3(1, 1, 1)), f.x);
+    return mix(mix(a, b, f.y), mix(c, d, f.y), f.z);
+}
+
+// The detail texel of pattern k over the ground, triplanar (three faces weighted by w), and the
+// bump it gives in world space. (The texture repeats each unit of its coordinates: the fraction is
+// all its phase needs.) Nearly flat ground - most of a track - reads its top face only: the other
+// two weigh under 2% there, and a third of the reads is a third of the cost.
+vec4 DetailTexel(vec3 wp, vec3 dwx, vec3 dwy, vec3 w, int k, vec2 shift, out vec3 bump)
+{
+    float s = u_freq[k];
+    vec3 q = PatternPos(wp, k);
+    if (w.y > 0.98) {
+        vec4 ty = textureGrad(u_detail, q.xz + shift, dwx.xz * s, dwy.xz * s);
+        vec2 gy = ty.rg * 2.0 - 1.0;
+        bump = vec3(gy.x, 0.0, gy.y);
+        return ty;
+    }
+    vec4 tx = textureGrad(u_detail, q.zy + shift, dwx.zy * s, dwy.zy * s);
+    vec4 ty = textureGrad(u_detail, q.xz + shift, dwx.xz * s, dwy.xz * s);
+    vec4 tz = textureGrad(u_detail, q.xy + shift, dwx.xy * s, dwy.xy * s);
+    vec2 gx = tx.rg * 2.0 - 1.0, gy = ty.rg * 2.0 - 1.0, gz = tz.rg * 2.0 - 1.0;
+    bump = vec3(0.0, gx.y, gx.x) * w.x + vec3(gy.x, 0.0, gy.y) * w.y + vec3(gz.x, gz.y, 0.0) * w.z;
+    return tx * w.x + ty * w.y + tz * w.z;
+}
+
+// Fine detail laid over the ground in world space (triplanar, two scales), lit by the sun. Ultra
+// graphics: a third, coarser scale (clods, a couple of metres a tile), every scale reaching about
+// five times further out, the bumps standing out more against the sun (more of the light coming
+// from it, the shading let go further either way; lit faces a touch warm, the crumbs' shadows a
+// touch cool), and the ground broken into big patches - lighter and drier, darker and richer - as
+// real ground is, from the same texture read very large.
 vec3 Dirt(vec3 c, vec3 wp, vec3 dwx, vec3 dwy, vec3 n, float z, float mask)
 {
     vec3 w = pow(abs(n), vec3(4.0));
     w /= (w.x + w.y + w.z);
-    float fades[2];
-    fades[0] = 1.0 - smoothstep(25.0, 60.0, z);
-    fades[1] = 1.0 - smoothstep(7.0, 22.0, z);
+    bool ultra = u_ultra > 0.5;
+    float m = u_metre;
+    float fades[3];
+    fades[0] = ultra ? 1.0 - smoothstep(30.0 * m, 70.0 * m, z) : 1.0 - smoothstep(25.0, 60.0, z);
+    fades[1] = ultra ? 1.0 - smoothstep(6.0 * m, 20.0 * m, z) : 1.0 - smoothstep(7.0, 22.0, z);
+    fades[2] = ultra ? 1.0 - smoothstep(50.0 * m, 100.0 * m, z) : 0.0;
     vec3 bump = vec3(0.0);
     vec2 tone = vec2(0.0);
-    for (int k = 0; k < 2; ++k) {
-        float s = (k == 0 ? 0.6 : 2.6) / u_dirtScale;
-        vec4 tx = textureGrad(u_detail, wp.zy * s, dwx.zy * s, dwy.zy * s);
-        vec4 ty = textureGrad(u_detail, wp.xz * s, dwx.xz * s, dwy.xz * s);
-        vec4 tz = textureGrad(u_detail, wp.xy * s, dwx.xy * s, dwy.xy * s);
-        vec2 gx = tx.rg * 2.0 - 1.0, gy = ty.rg * 2.0 - 1.0, gz = tz.rg * 2.0 - 1.0;
-        float f = fades[k] * (k == 0 ? 0.7 : 1.0);
-        bump += (vec3(0.0, gx.y, gx.x) * w.x + vec3(gy.x, 0.0, gy.y) * w.y + vec3(gz.x, gz.y, 0.0) * w.z) * f;
-        vec4 t = tx * w.x + ty * w.y + tz * w.z;
+    for (int k = 0; k < 3; ++k) {
+        if (fades[k] <= 0.0)
+            continue;
+        vec3 b;
+        vec4 t = DetailTexel(wp, dwx, dwy, w, k == 0 ? kPatternDirt : k == 1 ? kPatternDirtFine : kPatternClods,
+                             k == 2 ? vec2(0.37, 0.71) : vec2(0.0), b);
+        float f = fades[k] * (k == 0 ? 0.7 : k == 1 ? 1.0 : 0.8);
+        bump += b * f;
         tone += (t.ba - 0.5) * f;
     }
-    vec3 nd = normalize(n + bump * 1.3);
-    float before = max(dot(n, u_lightWorld), 0.0) * 0.75 + 0.35;
-    float after = max(dot(nd, u_lightWorld), 0.0) * 0.75 + 0.35;
-    float shade = clamp(after / before, 0.6, 1.45);
-    float cavity = 1.0 + tone.x * 0.5;
-    float albedo = 1.0 + tone.y * 0.55;
-    return mix(c, c * (shade * cavity * albedo), mask);
+    float relief = ultra ? 2.0 : 1.3;
+    float direct = ultra ? 0.9 : 0.75, ambient = ultra ? 0.22 : 0.35;
+    vec3 nd = normalize(n + bump * relief);
+    float before = max(dot(n, u_lightWorld), 0.0) * direct + ambient;
+    float after = max(dot(nd, u_lightWorld), 0.0) * direct + ambient;
+    float shade = ultra ? clamp(after / before, 0.45, 1.75) : clamp(after / before, 0.6, 1.45);
+    float cavity = 1.0 + tone.x * (ultra ? 0.7 : 0.5);
+    float albedo = 1.0 + tone.y * (ultra ? 0.8 : 0.55);
+    vec3 lit = c * (shade * cavity * albedo);
+    if (ultra) {
+        // (Warm where the sun catches a crumb, cool in its shadow - the sky lighting it there.)
+        lit *= mix(vec3(0.95, 0.98, 1.05), vec3(1.04, 1.0, 0.95), clamp((shade - 0.7) / 0.6, 0.0, 1.0));
+        // The patches: the texture's albedo read at ~25 m and ~90 m a tile (two reads, the top face).
+        float s1 = u_freq[kPatternPatches], s2 = u_freq[kPatternPatchesWide];
+        float p1 = textureGrad(u_detail, PatternPos(wp, kPatternPatches).xz + vec2(0.13, 0.57), dwx.xz * s1, dwy.xz * s1).a;
+        float p2 = textureGrad(u_detail, PatternPos(wp, kPatternPatchesWide).xz + vec2(0.61, 0.29), dwx.xz * s2, dwy.xz * s2).a;
+        float patches = clamp((p1 - 0.5) * 1.1 + (p2 - 0.5) * 0.9, -0.5, 0.5);
+        float l = Luma(lit);
+        lit = mix(vec3(l), lit, 1.0 - patches * 0.35) * (1.0 + patches * 0.32);  // lighter and paler, or darker and richer
+    }
+    return mix(c, lit, mask);
 }
 
 // The ground's own detail texel at wp (triplanar, the three faces weighted by the surface's
 // own normal), as Dirt reads it: rg are the bump's xy, b its height and a its albedo. Only the
 // blended texel comes back, which is what the marks want of it: their floor is the same dirt
 // the surface has, so it has to be the same texel, just read closer.
-vec4 DetailAt(vec3 wp, vec3 dwx, vec3 dwy, vec3 n, float s)
+vec4 DetailAt(vec3 wp, vec3 dwx, vec3 dwy, vec3 n, int k)
 {
     vec3 w = pow(abs(n), vec3(4.0));
     w /= (w.x + w.y + w.z);
-    vec4 tx = textureGrad(u_detail, wp.zy * s, dwx.zy * s, dwy.zy * s);
-    vec4 ty = textureGrad(u_detail, wp.xz * s, dwx.xz * s, dwy.xz * s);
-    vec4 tz = textureGrad(u_detail, wp.xy * s, dwx.xy * s, dwy.xy * s);
-    return tx * w.x + ty * w.y + tz * w.z;
+    vec3 unused;
+    return DetailTexel(wp, dwx, dwy, w, k, vec2(0.0), unused);
 }
 
 float ValueNoise(vec3 p)
@@ -481,7 +557,7 @@ vec3 TireMarks(vec3 c, vec3 p, vec3 wp, vec3 dwx, vec3 dwy, vec3 n, vec2 lFloor,
     // the ground around it in grain and colour by construction.
     vec4 tex = vec4(0.5);
     if (u_dirt > 0.0)
-        tex = DetailAt(wp, dwx, dwy, n, 5.2 / u_dirtScale);
+        tex = DetailAt(wp, dwx, dwy, n, kPatternRutFloor);
     // The dirt the tire left is this ground's own dirt, pressed: only the things pressed dirt
     // does to a colour are done to it - a little less varied, a touch warmer, and darker. Not
     // one of these is a colour of its own, so the track's own texture comes through and the
@@ -510,7 +586,8 @@ vec3 TireMarks(vec3 c, vec3 p, vec3 wp, vec3 dwx, vec3 dwy, vec3 n, vec2 lFloor,
     // ring on pale ground or a dark one on dark. Kept to the rut's shallow flanks: the walls,
     // where the dirt really was pushed aside, not down the floor of the channel.
     float edge = clamp(around - m, 0.0, 1.0) * k * smoothstep(0.25, 0.1, m);
-    float clods = smoothstep(0.35, 0.75, ValueNoise(wp * (30.0 / u_metre)) * 0.6 + Hash13(floor(wp * (40.0 / u_metre))) * 0.4);
+    float clods = smoothstep(0.35, 0.75, PatternNoise(wp, kPatternRutClods) * 0.6 +
+                                             Hash13(floor(PatternPos(wp, kPatternRutCrumbs)) + u_phaseI[kPatternRutCrumbs]) * 0.4);
     col = mix(col, c * (0.92 + 0.24 * clods) * relight, edge * (0.3 + 0.45 * clods));
     return col;
 }
@@ -583,7 +660,7 @@ vec3 SnowNormal(vec3 n, vec3 wp, vec3 dwx, vec3 dwy, float z)
 vec3 Snow(vec3 c, vec3 wp, vec3 dwx, vec3 dwy, vec3 n, float z, float ground, vec2 rut, out float cover)
 {
     float upright = smoothstep(0.35, 0.8, dot(n, u_up));
-    float drifts = ValueNoise(wp * (0.3 / u_metre)) * 0.65 + ValueNoise(wp * (1.6 / u_metre)) * 0.35;
+    float drifts = PatternNoise(wp, kPatternDrifts) * 0.65 + PatternNoise(wp, kPatternDriftsFine) * 0.35;
     float depth = u_snow * (0.45 + 0.55 * upright) * (0.7 + 0.6 * drifts);
     float settled = smoothstep(0.25, 0.6, depth);
     // The game's own light on the ground, gently (its texture's blotches mostly left out).
@@ -593,7 +670,7 @@ vec3 Snow(vec3 c, vec3 wp, vec3 dwx, vec3 dwy, vec3 n, float z, float ground, ve
     float before = max(dot(n, u_lightWorld), 0.0) * 0.7 + 0.4;
     float after = max(dot(ns, u_lightWorld), 0.0) * 0.7 + 0.4;
     float relief = clamp(after / before, 0.72, 1.28);
-    vec3 fresh = vec3(0.80, 0.84, 0.90) * (0.94 + 0.06 * ValueNoise(wp * (5.0 / u_metre)));
+    vec3 fresh = vec3(0.80, 0.84, 0.90) * (0.94 + 0.06 * PatternNoise(wp, kPatternSnow));
     fresh *= mix(vec3(0.9, 0.95, 1.07), vec3(1.0), smoothstep(0.8, 1.05, relief));  // turned away: bluer
     vec3 snow = fresh * shading * relief;  // (no glints: grains a pixel wide or more read as white dashes, and shimmer)
     // The rut, by how deep it is.
@@ -641,8 +718,13 @@ float GrooveDepth(vec3 p, vec3 n, vec3 dirW)
     float m = sNear.x * wNear, around = max(sNear.y * wNear, m);
     if (m < 0.004 && around < 0.004)
         return 0.0;
-    // Where the floor sits at full depth: texels along the ray's own course over the map.
-    vec2 shift = vec2(dot(dirW, u_markUW), dot(dirW, u_markVW)) * (dep / max(-vdZ, 1e-3)) / texel;
+    // Where the floor sits at full depth: texels along the ray's own course over the map - the part
+    // of it along the surface (the groove is dug in along the surface's normal; the map is the
+    // ground seen from above). Taken whole, the ray's way into a steep berm faced head-on is mostly
+    // level: the march ran across the map to ruts up or down the slope, and the floor came from
+    // there - the ruts smeared up and down a berm seen from the front. (Flat ground: the same.)
+    vec3 across = dirW - n * vdZ;
+    vec2 shift = vec2(dot(across, u_markUW), dot(across, u_markVW)) * (dep / max(-vdZ, 1e-3)) / texel;
     shift *= wNear;
     // Down from the deepest stop to the ground itself: the first stop under whose height the
     // ray's own height there has fallen is where the ray has reached the dirt. The crossing is
@@ -869,8 +951,11 @@ void main()
                         float wd = smoothstep(0.05 * relief, 0.3 * relief, gd) * onGround;
                         c = mix(c, cF, wd);
                         if (gd > 0.5 * u_markTexel && onGround > 0.5) {
-                            pD = pF;
-                            wpD = wp + dir * along;
+                            // (The floor's place on the map and its dirt: the surface right over it,
+                            // where the groove was pressed in - on flat ground, where it always was;
+                            // on a berm's face, the same spot of the face, not one up or down it.)
+                            pD = pF + nView * gd;
+                            wpD = wp + dir * along + nWorld * gd;
                             dwxD = dFdx(wpD);
                             dwyD = dFdy(wpD);
                         }
@@ -884,7 +969,8 @@ void main()
                 }
             }
             if (u_dirt > 0.0) {
-                float mask = ground * u_dirt * (1.0 - smoothstep(45.0, 60.0, z));
+                float mask = ground * u_dirt * (u_ultra > 0.5 ? 1.0 - smoothstep(70.0 * u_metre, 110.0 * u_metre, z)
+                                                              : 1.0 - smoothstep(45.0, 60.0, z));
                 if (mask > 0.001)
                     c = Dirt(c, wpD, dwxD, dwyD, nFloor, z, mask);
             }
