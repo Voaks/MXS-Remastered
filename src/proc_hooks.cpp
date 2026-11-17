@@ -254,6 +254,16 @@ struct DeferredCaster {
     int      uniforms = -1;      // its program's other uniforms as it was drawn: g_uniformSnaps[uniforms]
 };
 std::vector<DeferredCaster> g_deferredCasters;
+// A see-through draw (a tree, after the first one: postfx::WantsSeeThroughDepth) held back as drawn -
+// with the camera's matrices it had - to be drawn again, depth only, for its own distance
+// (FlushSeeThroughDepth).
+struct SeeThroughDraw {
+    DeferredCaster c;
+    GLfloat        modelview[16] = {}, projection[16] = {};
+};
+std::vector<SeeThroughDraw> g_seeThroughDraws;
+int g_seeThroughSkipped = 0;  // this frame's that couldn't be (their buffers rewritten as they go: dust)
+std::atomic<bool> g_onTrack{ false };  // out on a track: the game's 3D camera seen in the last half second (OnTrack)
 
 // ---- The uniforms a held-back caster was drawn with ------------------------------------------
 // A held-back caster is drawn again at the end of the scene, with its program as the game last
@@ -4369,8 +4379,233 @@ void FlushShadowCasters()
     g_casterBones.clear();
 }
 
+// A see-through draw kept to be drawn again for its depth (FlushSeeThroughDepth). Not one with bones
+// (the riders' program draws the scenery too: its rigid draws are fine, as for the shadow map), nor
+// one whose buffers are rewritten as it goes (the game's dust): those keep the haze of what's behind.
+void KeepSeeThrough(const DrawCall& draw)
+{
+    if (g_seeThroughDraws.size() >= 4096)
+        return;
+    const auto mv = g_programModelview.find(g_program);
+    if (mv == g_programModelview.end() || mv->second.frame != g_frameNumber || mv->second.kind != ModelviewKind::Scene ||
+        mv->second.location < 0)
+        return;
+    const auto projection = g_programProjection.find(g_program);
+    if (projection == g_programProjection.end() || projection->second.location < 0)
+        return;
+    if (!StaticDraw(draw) || !VertexArraySteady()) {
+        ++g_seeThroughSkipped;
+        return;
+    }
+    SeeThroughDraw s;
+    s.c = MakeCaster(draw, mv->second.location, projection->second.location);
+    std::copy(mv->second.uploaded, mv->second.uploaded + 16, s.modelview);
+    std::copy(projection->second.value, projection->second.value + 16, s.projection);
+    g_seeThroughDraws.push_back(s);
+}
+
+// The see-through draws held back this frame, drawn again depth only into postfx's own depth, all
+// at once (before the shadow map's casters: their uniforms' copies are let go there). As the game
+// drew them: their program, arrays, textures, constant attributes, uniforms and matrices; the game's
+// put back after.
+void FlushSeeThroughDepth()
+{
+    const int skipped = g_seeThroughSkipped;
+    g_seeThroughSkipped = 0;
+    if (g_seeThroughDraws.empty())
+        return;
+    const PFN_UniformMatrix4fv upload = real_glUniformMatrix4fv ? real_glUniformMatrix4fv : real_glUniformMatrix4fvARB;
+    static PFN_BindTexture bindTexture = nullptr;
+    if (!bindTexture)
+        bindTexture = reinterpret_cast<PFN_BindTexture>(GetRealGLFunction("glBindTexture"));
+    if (!real_glDrawElements)
+        real_glDrawElements = reinterpret_cast<PFN_DrawElements>(GetRealGLFunction("glDrawElements"));
+    if (!real_glDrawArrays)
+        real_glDrawArrays = reinterpret_cast<PFN_DrawArrays>(GetRealGLFunction("glDrawArrays"));
+    if (!upload || !real_glUseProgram || !real_glBindVertexArray || !real_glActiveTexture || !bindTexture ||
+        !postfx::BeginSeeThroughDepth()) {
+        g_seeThroughDraws.clear();
+        return;
+    }
+    const auto UploadSlot = [](GLint location, const UniformSlot& slot) {
+        switch (slot.kind) {
+        case 1: if (real_glUniform1i) real_glUniform1i(location, slot.i); break;
+        case 2: if (real_glUniform1f) real_glUniform1f(location, slot.v[0]); break;
+        case 3: if (real_glUniform2fv) real_glUniform2fv(location, 1, slot.v); break;
+        case 4: if (real_glUniform3fv) real_glUniform3fv(location, 1, slot.v); break;
+        case 5: if (real_glUniform4fv) real_glUniform4fv(location, 1, slot.v); break;
+        default: break;
+        }
+    };
+    GLuint program = 0, vao = 0;
+    GLuint bound[kTrackedUnits];
+    for (int u = 0; u < kTrackedUnits; ++u)
+        bound[u] = g_boundTextures[u];
+    std::vector<GLuint> touched, rigid;  // programs used; skinned ones given the rigid draws' bone
+    std::unordered_map<GLuint, std::vector<UniformSlot>> uniformsNow;
+    const auto BoneLocation = [](const SkinnedProgram* skin, GLint location) {
+        return skin && (location == skin->centreLoc || location == skin->positionLoc || location == skin->rotationLoc ||
+                        location == skin->countLoc);
+    };
+    GLfloat attribNow[kConstAttribs][4];
+    std::copy(&g_constAttrib[0][0], &g_constAttrib[0][0] + kConstAttribs * 4, &attribNow[0][0]);
+    int drawn = 0;
+    for (const SeeThroughDraw& s : g_seeThroughDraws) {
+        const DeferredCaster& c = s.c;
+        const auto element = g_elementBuffers.find(c.vao);
+        if (c.draw.kind != DrawCall::Arrays && (element == g_elementBuffers.end() || element->second != c.elementBuffer))
+            continue;  // (its vertex array given other indices since)
+        if (c.program != program) {
+            real_glUseProgram(c.program);
+            program = c.program;
+            if (std::find(touched.begin(), touched.end(), program) == touched.end())
+                touched.push_back(program);
+        }
+        if (c.vao != vao) {
+            real_glBindVertexArray(c.vao);
+            vao = c.vao;
+        }
+        for (int u = 0; u < kTrackedUnits; ++u) {  // (a shader that throws away its leaves' clear texels by them)
+            if (bound[u] != c.textures[u]) {
+                real_glActiveTexture(kTexture0Unit + u);
+                bindTexture(GL_TEXTURE_2D, c.textures[u]);
+                bound[u] = c.textures[u];
+            }
+        }
+        if (c.uniforms >= 0 && c.uniforms < static_cast<int>(g_uniformSnaps.size()) &&
+            g_uniformSnaps[static_cast<size_t>(c.uniforms)].program == c.program) {
+            auto at = uniformsNow.find(c.program);
+            if (at == uniformsNow.end())
+                at = uniformsNow.emplace(c.program, g_programUniforms[c.program].now).first;
+            std::vector<UniformSlot>& now = at->second;
+            const SkinnedProgram* own = FindSkinned(c.program);
+            for (const auto& [location, slot] : g_uniformSnaps[static_cast<size_t>(c.uniforms)].slots) {
+                if (location == c.modelviewLoc || location == c.projectionLoc || BoneLocation(own, location))
+                    continue;
+                if (now.size() <= static_cast<size_t>(location))
+                    now.resize(static_cast<size_t>(location) + 1);
+                if (now[static_cast<size_t>(location)] == slot)
+                    continue;
+                UploadSlot(location, slot);
+                now[static_cast<size_t>(location)] = slot;
+            }
+        }
+        upload(c.modelviewLoc, 1, GL_FALSE, s.modelview);
+        upload(c.projectionLoc, 1, GL_FALSE, s.projection);
+        if (c.boneCountLoc >= 0 && real_glUniform1i) {
+            // A rigid draw of the riders' program (the scenery's): no bones counted and one at the origin,
+            // as the game draws it (the program may hold a rider's by now) - as for the shadow map.
+            real_glUniform1i(c.boneCountLoc, 0);
+            if (std::find(rigid.begin(), rigid.end(), c.program) == rigid.end()) {
+                if (const SkinnedProgram* own = FindSkinned(c.program)) {
+                    static const GLfloat kZero[3] = { 0, 0, 0 }, kIdentity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+                    if (own->centreLoc >= 0)
+                        UploadSkinnedVectors(own->centreLoc, 1, kZero, own->positionArb);
+                    if (own->positionLoc >= 0)
+                        UploadSkinnedVectors(own->positionLoc, 1, kZero, own->positionArb);
+                    if (own->rotationLoc >= 0)
+                        UploadSkinnedRotations(own->rotationLoc, 1, false, kIdentity, own->rotationArb);
+                    rigid.push_back(c.program);
+                }
+            }
+        }
+        if (real_glVertexAttrib4f) {
+            for (int k = 0; k < kConstAttribs; ++k) {
+                if (!(c.attribSet & (1u << k)))
+                    continue;
+                if (!std::equal(c.attrib[k], c.attrib[k] + 4, attribNow[k])) {
+                    real_glVertexAttrib4f(static_cast<GLuint>(k), c.attrib[k][0], c.attrib[k][1], c.attrib[k][2], c.attrib[k][3]);
+                    std::copy(c.attrib[k], c.attrib[k] + 4, attribNow[k]);
+                }
+            }
+        }
+        Replay(c.draw);
+        ++drawn;
+    }
+    // Back as the game left it.
+    if (real_glVertexAttrib4f) {
+        for (int k = 0; k < kConstAttribs; ++k) {
+            if (!(g_constAttribSet & (1u << k)))
+                continue;
+            if (!std::equal(g_constAttrib[k], g_constAttrib[k] + 4, attribNow[k]))
+                real_glVertexAttrib4f(static_cast<GLuint>(k), g_constAttrib[k][0], g_constAttrib[k][1], g_constAttrib[k][2],
+                                      g_constAttrib[k][3]);
+        }
+    }
+    for (GLuint p : touched) {
+        real_glUseProgram(p);
+        const SkinnedProgram* skin = FindSkinned(p);
+        if (const auto at = uniformsNow.find(p); at != uniformsNow.end()) {
+            const ProgramUniforms& game = g_programUniforms[p];
+            for (GLint location : game.used) {
+                const size_t l = static_cast<size_t>(location);
+                if (l >= game.now.size() || l >= at->second.size() || game.now[l].kind == 0 || BoneLocation(skin, location))
+                    continue;
+                if (at->second[l] != game.now[l])
+                    UploadSlot(location, game.now[l]);
+            }
+        }
+        const auto mv = g_programModelview.find(p);
+        if (mv != g_programModelview.end() && mv->second.location >= 0)
+            upload(mv->second.location, 1, GL_FALSE, mv->second.uploaded);
+        const auto projection = g_programProjection.find(p);
+        if (projection != g_programProjection.end() && projection->second.location >= 0)
+            upload(projection->second.location, 1, GL_FALSE, projection->second.value);
+        if (skin && skin->positionLoc >= 0 && skin->countLoc >= 0 && real_glUniform1i)
+            real_glUniform1i(skin->countLoc, skin->bones);  // the game's bone count again
+        if (skin && std::find(rigid.begin(), rigid.end(), p) != rigid.end()) {
+            // Its bones as they were: the game's, or ours with your torso hidden.
+            if (skin->centres > 0)
+                UploadSkinnedVectors(skin->centreLoc, skin->centres, skin->centre, skin->positionArb);
+            if (skin->positions > 0)
+                UploadSkinnedVectors(skin->positionLoc, skin->positions,
+                                     skin->positionEdited ? skin->hiddenPosition : skin->position, skin->positionArb);
+            if (skin->rotations > 0)
+                UploadSkinnedRotations(skin->rotationLoc, skin->rotations, skin->transposed,
+                                       skin->rotationEdited ? skin->hiddenRotation : skin->rotation, skin->rotationArb);
+        }
+    }
+    real_glUseProgram(g_program);
+    real_glBindVertexArray(g_vao);
+    for (int u = 0; u < kTrackedUnits; ++u) {
+        if (bound[u] != g_boundTextures[u]) {
+            real_glActiveTexture(kTexture0Unit + u);
+            bindTexture(GL_TEXTURE_2D, g_boundTextures[u]);
+        }
+    }
+    real_glActiveTexture(kTexture0Unit + static_cast<GLenum>(g_activeUnit));
+    postfx::EndSeeThroughDepth();
+    static int logged = 0;
+    if (logged < 3) {
+        ++logged;
+        Log("postfx: %d see-through draws drawn again for their depth (%d couldn't be: their buffers rewritten as they go)",
+            drawn, skipped);
+    }
+    g_seeThroughDraws.clear();
+}
+
 bool NoteDraw(const DrawCall& draw)
 {
+    // Everything drawn so far this frame is the sky (and what sits at infinity with it): a picture of
+    // it for the effects, before the first draw placed in the world (the terrain, or anything moved).
+    // And everything solid, at the first see-through draw placed in the world once the terrain's done
+    // (a tree's leaves or trunk, dust): what's drawn see-through after is told apart.
+    const bool skyShot = postfx::WantsSkyShot();
+    const bool seeShot = !g_depthWrites && !g_terrain.isTerrain && postfx::WantsSeeThroughShot();
+    if (skyShot || seeShot) {
+        bool placed = g_terrain.isTerrain;
+        if (!placed) {
+            const auto mv = g_programModelview.find(g_program);
+            placed = mv != g_programModelview.end() && mv->second.frame == g_frameNumber && mv->second.kind == ModelviewKind::Scene &&
+                     HasTranslation(mv->second.raw);
+        }
+        if (placed && skyShot)
+            postfx::SnapshotSky();
+        if (placed && seeShot)
+            postfx::SnapshotSeeThrough();
+    }
+    if (!g_depthWrites && !g_terrain.isTerrain && postfx::WantsSeeThroughDepth())
+        KeepSeeThrough(draw);
     if (!g_terrain.isTerrain && postfx::WantsSceneEnd())
         CheckSceneEnd();
     if (!g_terrain.isTerrain) {
@@ -4453,6 +4688,8 @@ bool NoteDraw(const DrawCall& draw)
 bool EndShaderFrame()
 {
     g_deferredCasters.clear();  // a frame whose shadows weren't applied
+    g_seeThroughDraws.clear();
+    g_seeThroughSkipped = 0;
     ClearUniformSnaps();
     g_nearDraws.clear();
     g_riderDraws.clear();
@@ -4526,6 +4763,7 @@ bool EndShaderFrame()
             sceneSeen = true;
         }
         const bool onTrack = sceneSeen && nowTime - lastScene < std::chrono::milliseconds(500);
+        g_onTrack = onTrack;
         const Config& c = GetConfig();
         const bool rain = onTrack && c.shaders && c.weather == kWeatherRain;
         const bool snow = onTrack && c.shaders && c.weather == kWeatherSnow;
@@ -4611,5 +4849,7 @@ const char* GameOverlayStatusText()
     snprintf(text, sizeof text, "%s%s%s", hud, hud[0] && cursor[0] ? "   \xB7   " : "", cursor);
     return text;
 }
+
+bool OnTrack() { return g_onTrack.load(); }
 
 }  // namespace mxcam

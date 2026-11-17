@@ -55,6 +55,7 @@
 
 #include <windows.h>
 #include <GL/gl.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -306,13 +307,21 @@ int main(int argc, char** argv)
         settings = base.replace(base.find("DirtDetail=0"), 12, "DirtDetail=1\nUltraGraphics=1");
     else if (mode == "night")
         settings = base.replace(base.find("TimeOfDay=-1"), 12, "TimeOfDay=0");
+    else if (mode == "treeghost")  // a grey "trunk" drawn without depth on the dirt: no dirt, AO or shadow through it
+        settings = base.replace(base.find("DirtDetail=0"), 12, "DirtDetail=1\nUltraGraphics=1")
+                       .replace(base.find("Shadows=0") + 4, 9, "Shadows=1\nShadowMap=1");
+    else if (mode == "treefog")  // rain: a tall grey "tree" drawn without depth, in front of the near ground, the far
+        // ground and the sky - fogged alike all the way up (as far off as it is, not as what's behind it)
+        settings = base + "[Weather]\nRain=1\nRainfall=1\nRainWind=0\nWetness=0\nPuddles=0\nRainSound=0\n";
+    else if (mode == "skyghost")  // dusk, a green "tree" drawn over the sky without depth: it keeps its colour
+        settings = base.replace(base.find("TimeOfDay=-1"), 12, "TimeOfDay=17.6");
     else if (mode == "snow" || mode == "snowperf")
         settings = base + "[Weather]\nSnow=1\nSnowfall=1\nWind=0.3\n";
     else if (mode == "snowground")  // the snow on the ground alone, nothing falling (frames to compare: MXCAM_TEST_CAM_X)
         settings = base + "[Weather]\nSnow=1\nSnowfall=0\nWind=0\nSnowSound=0\nSnowTires=0\n" +
                    (getenv("MXCAM_TEST_SNOW_AMOUNT") ? "SnowAmount=" + std::string(getenv("MXCAM_TEST_SNOW_AMOUNT")) + "\n"
                                                      : std::string());
-    else if (mode == "rain" || mode == "rainperf")
+    else if (mode == "rain" || mode == "rainperf" || mode == "treefogperf")
         settings = base + "[Weather]\nRain=1\nRainfall=1\nRainWind=0.3\nWetness=0.8\nPuddles=" +
                    std::string(getenv("MXCAM_TEST_PUDDLES") ? getenv("MXCAM_TEST_PUDDLES") : "0.8") + "\nReflections=1\n";
     else if (mode == "lightning")
@@ -469,7 +478,7 @@ int main(int argc, char** argv)
     }
     // Timing: not held to the screen's refresh (every frame took exactly 1 / refresh otherwise).
     if (mode == "shadowperf" || mode == "shadowperf0" || mode == "snowperf" || mode == "snowperf0" || mode == "dirtperf" ||
-        mode == "ultraperf" || mode == "rainperf") {
+        mode == "ultraperf" || mode == "rainperf" || mode == "treefogperf") {
         using PFN_SwapInterval = BOOL(WINAPI*)(int);
         if (const auto swapInterval = reinterpret_cast<PFN_SwapInterval>(p_wglGetProcAddress("wglSwapIntervalEXT")))
             swapInterval(0);
@@ -678,7 +687,10 @@ int main(int argc, char** argv)
         MakeView(getenv("MXCAM_TEST_CAM_X") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_X"))) : 0.0f,
                  getenv("MXCAM_TEST_CAM_Y") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_Y"))) : 1.6f,
                  getenv("MXCAM_TEST_CAM_Z") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_Z"))) : 0.0f,
-                 getenv("MXCAM_TEST_CAM_PITCH") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_PITCH"))) : 12.0f, 0.0f, view);
+                 getenv("MXCAM_TEST_CAM_PITCH") ? static_cast<float>(atof(getenv("MXCAM_TEST_CAM_PITCH")))
+                 : mode == "treefog"            ? 2.0f
+                                                : 12.0f,
+                 0.0f, view);
     // What the game sends (eye space, toward the sun). For the shadow check: from the right, so
     // the box's shadow falls on the ground to its left.
     // For the shadow map check: low, from behind, so a tower behind the camera (never on screen)
@@ -775,7 +787,8 @@ int main(int argc, char** argv)
 
     const bool snowTiming = mode == "snowperf" || mode == "snowperf0" ||  // timing: snow at 100% / off,
                             mode == "dirtperf" || mode == "ultraperf" ||  // the dirt detail, without and with Ultra,
-                            mode == "rainperf";                           // rain at 100%
+                            mode == "rainperf" ||                         // rain at 100%,
+                            mode == "treefogperf";                        // and with 800 see-through draws
     // shadowfar: as shadowperf, plus 2400 boxes placed in world space (their vertices where they stand,
     // drawn with the bare view, as the game draws much of a track's scenery), nearly all far outside the
     // shadow distance: none of those may cost the shadow map anything.
@@ -795,6 +808,7 @@ int main(int argc, char** argv)
     // riderfar: shadows on, your rider, and another 8 m behind yours: its body (skinned) is held back
     // with its bones and cast in the batch - its shadow must be there as when cast one at a time.
     const bool riderFar = mode == "riderfar";
+    const float ghostAt[3] = { -3.0f, 4.8f, -24.0f };  // skyghost: the green block's middle (world)
     // rival: your bike (where its wheels sit learnt) with another bike 1 m beside it at your speed,
     // its wheels spinning too; after 1.5 s your rear wheel isn't drawn (as in first person). Your
     // tire marks must stay yours: none in the other bike's track.
@@ -1133,6 +1147,69 @@ int main(int argc, char** argv)
 
         // An object 6 m ahead, 1 m cube, red.
         gl.UseProgram(object);
+        // skyghost: a green block far off, above the horizon (against the sky), drawn without depth -
+        // as a track's distant hills and trees are. First, so the sky's picture is taken before it.
+        if (mode == "treefog") {  // (three 1 m grey blocks stacked 10 m ahead, no depth written)
+            gl.UniformMatrix4fv(oProj, 1, GL_FALSE, projection);
+            gl.Uniform3fv(oLight, 1, sunEye);
+            const float grey[3] = { 0.3f, 0.32f, 0.28f };
+            gl.Uniform3fv(oColor, 1, grey);
+            gl.BindVertexArray(arrays[1]);
+            p_glDepthMask(GL_FALSE);
+            for (int k = 0; k < 3; ++k) {
+                const float blockModel[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2.5f, static_cast<float>(k), -10.0f, 1 };
+                float blockView[16];
+                Mul(view, blockModel, blockView);
+                gl.UniformMatrix4fv(oMv, 1, GL_FALSE, blockView);
+                p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
+            }
+            p_glDepthMask(GL_TRUE);
+        }
+        if (mode == "treefogperf") {  // (800 grey blocks without depth, a "forest" from 15 to 215 m off)
+            gl.UniformMatrix4fv(oProj, 1, GL_FALSE, projection);
+            gl.Uniform3fv(oLight, 1, sunEye);
+            const float grey[3] = { 0.3f, 0.32f, 0.28f };
+            gl.Uniform3fv(oColor, 1, grey);
+            gl.BindVertexArray(arrays[1]);
+            p_glDepthMask(GL_FALSE);
+            for (int k = 0; k < 800; ++k) {
+                const float blockModel[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, static_cast<float>(k % 40) * 2.0f - 40.0f, 0.0f,
+                                               -15.0f - static_cast<float>(k / 40) * 10.0f, 1 };
+                float blockView[16];
+                Mul(view, blockModel, blockView);
+                gl.UniformMatrix4fv(oMv, 1, GL_FALSE, blockView);
+                p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
+            }
+            p_glDepthMask(GL_TRUE);
+        }
+        if (mode == "treeghost") {  // (a 1 m grey block on the dirt 5 m ahead, a little left, no depth written)
+            gl.UniformMatrix4fv(oProj, 1, GL_FALSE, projection);
+            gl.Uniform3fv(oLight, 1, sunEye);
+            const float trunkModel[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1.6f, 0.0f, -5.0f, 1 };
+            float trunkView[16];
+            Mul(view, trunkModel, trunkView);
+            gl.UniformMatrix4fv(oMv, 1, GL_FALSE, trunkView);
+            const float grey[3] = { 0.42f, 0.4f, 0.38f };
+            gl.Uniform3fv(oColor, 1, grey);
+            gl.BindVertexArray(arrays[1]);
+            p_glDepthMask(GL_FALSE);
+            p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
+            p_glDepthMask(GL_TRUE);
+        }
+        if (mode == "skyghost") {
+            gl.UniformMatrix4fv(oProj, 1, GL_FALSE, projection);
+            gl.Uniform3fv(oLight, 1, sunEye);
+            const float ghostModel[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, ghostAt[0], ghostAt[1] - 0.5f, ghostAt[2], 1 };  // (unscaled: a scaled one is taken for the HUD)
+            float ghostView[16];
+            Mul(view, ghostModel, ghostView);
+            gl.UniformMatrix4fv(oMv, 1, GL_FALSE, ghostView);
+            const float green[3] = { 0.12f, 0.45f, 0.1f };
+            gl.Uniform3fv(oColor, 1, green);
+            gl.BindVertexArray(arrays[1]);
+            p_glDepthMask(GL_FALSE);
+            p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
+            p_glDepthMask(GL_TRUE);
+        }
         gl.UniformMatrix4fv(oProj, 1, GL_FALSE, projection);
         gl.Uniform3fv(oLight, 1, sunEye);
         const float model[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.0f, 0, -6.0f, 1 };
@@ -1410,7 +1487,7 @@ int main(int argc, char** argv)
         const Pixel flarePixel = At(flareX, 130), beside = At(flareX - 45, 130);
         const bool timeOfDay = mode == "night" || mode == "rainnight" || mode == "headlight" || mode == "narrowbeam" || mode == "thirdperson" ||
                                mode == "headlightup" || mode == "headlightdown" || mode == "headlightamber" ||
-                               mode == "headlightrainbow";
+                               mode == "headlightrainbow" || mode == "skyghost";
         printf("    lens flare %d %d %d, beside it %d %d %d\n", flarePixel.r, flarePixel.g, flarePixel.b, beside.r, beside.g, beside.b);
         if (timeOfDay)
             Check(Near(flarePixel, beside, 6), "the game's lens flare is hidden under a time of day of our own");
@@ -1564,6 +1641,86 @@ int main(int argc, char** argv)
               "the splashes' shaders compile");
         Check(log.find("carries the wet shine") != std::string::npos, "the bike shader carries the wet shine");
         Check(log.find("shader failed") == std::string::npos, "every effect's shader compiles with the rain in it");
+    } else if (mode == "treefog") {
+        // Up the blocks' middle, from just above their foot to just below their top: each row's brightness.
+        const auto Screen = [&](float wx, float wy, float wz, int& sx, int& sy) {
+            const float world[4] = { wx, wy, wz, 1 };
+            float eye[4] = {}, clip[4] = {};
+            for (int r = 0; r < 4; ++r)
+                for (int k = 0; k < 4; ++k)
+                    eye[r] += view[k * 4 + r] * world[k];
+            for (int r = 0; r < 4; ++r)
+                for (int k = 0; k < 4; ++k)
+                    clip[r] += projection[k * 4 + r] * eye[k];
+            sx = static_cast<int>((clip[0] / clip[3] * 0.5f + 0.5f) * W);
+            sy = H - 1 - static_cast<int>((clip[1] / clip[3] * 0.5f + 0.5f) * H);
+        };
+        int tx, bottom, top, unused;
+        Screen(-2.5f, 0.15f, -9.5f, tx, bottom);
+        Screen(-2.5f, 2.85f, -9.5f, unused, top);
+        // Each row's median across the block (the rain's streaks left out), and the top third's against the
+        // bottom third's: over the sky and far ground against over the near ground.
+        std::vector<double> rows;
+        for (int y = (std::max)(top, 0); y <= (std::min)(bottom, H - 1); ++y) {
+            std::vector<double> l;
+            for (int x = tx - 12; x <= tx + 12; ++x) {
+                const Pixel q = At(x, y);
+                l.push_back(0.3 * q.r + 0.59 * q.g + 0.11 * q.b);
+            }
+            std::nth_element(l.begin(), l.begin() + l.size() / 2, l.end());
+            rows.push_back(l[l.size() / 2]);
+        }
+        const size_t third = rows.size() / 3;
+        double upper = 0, lower = 0;
+        for (size_t i = 0; i < third; ++i) {
+            upper += rows[i] / third;
+            lower += rows[rows.size() - 1 - i] / third;
+        }
+        printf("    the blocks from row %d to %d: top third %.1f, bottom third %.1f (a step of %.1f)\n", top, bottom, upper, lower,
+               std::fabs(upper - lower));
+        Check(std::fabs(upper - lower) < 3.0, "what's drawn see-through is fogged as far off as it is, alike all the way up");
+    } else if (mode == "treeghost") {
+        // The block's middle on screen, and how much its pixels vary (the dirt's grain through it would).
+        const float world[4] = { -1.6f, 0.5f, -5.0f, 1 };
+        float eye[4] = {}, clip[4] = {};
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 4; ++k)
+                eye[r] += view[k * 4 + r] * world[k];
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 4; ++k)
+                clip[r] += projection[k * 4 + r] * eye[k];
+        const int tx = static_cast<int>((clip[0] / clip[3] * 0.5f + 0.5f) * W);
+        const int ty = H - 1 - static_cast<int>((clip[1] / clip[3] * 0.5f + 0.5f) * H);
+        double sum = 0, sum2 = 0;
+        int n = 0;
+        for (int y = ty - 12; y <= ty + 12; y += 2)
+            for (int x = tx - 12; x <= tx + 12; x += 2) {
+                const Pixel q = At(x, y);
+                const double l = 0.3 * q.r + 0.59 * q.g + 0.11 * q.b;
+                sum += l;
+                sum2 += l * l;
+                ++n;
+            }
+        const double mean = sum / n, spread = std::sqrt(std::fmax(sum2 / n - mean * mean, 0.0));
+        printf("    the block at (%d, %d): brightness %.1f, varying by %.2f\n", tx, ty, mean, spread);
+        Check(spread < 2.0, "what's drawn see-through over the dirt keeps its own look (no grain, AO or shadow through it)");
+    } else if (mode == "skyghost") {
+        // Where the green block is on screen (its middle), and the sky beside it.
+        float eye[4] = {}, clip[4] = {};
+        const float world[4] = { ghostAt[0], ghostAt[1], ghostAt[2], 1 };
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 4; ++k)
+                eye[r] += view[k * 4 + r] * world[k];
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 4; ++k)
+                clip[r] += projection[k * 4 + r] * eye[k];
+        const int gx = static_cast<int>((clip[0] / clip[3] * 0.5f + 0.5f) * W);
+        const int gy = H - 1 - static_cast<int>((clip[1] / clip[3] * 0.5f + 0.5f) * H);
+        const Pixel ghost = At(gx, gy), beside = At(gx + 160 < W - 5 ? gx + 160 : W - 5, gy);
+        printf("    the green block at (%d, %d): %d %d %d; the sky beside it %d %d %d\n", gx, gy, ghost.r, ghost.g, ghost.b, beside.r,
+               beside.g, beside.b);
+        Check(ghost.g > ghost.r + 10 && ghost.g > ghost.b, "what's drawn over the sky without depth keeps its own colour (not painted as sky)");
+        Check(beside.r > beside.g, "the sky itself still takes the dusk glow");
     } else if (mode == "night") {
         // Corners on both sides of the screen's diagonals: every pass must cover the whole window.
         const Pixel skyLeft = At(20, 20), skyRight = At(W - 20, 20), groundLeft = At(20, H - 20), groundRight = At(W - 20, H - 20);
@@ -1715,6 +1872,7 @@ int main(int argc, char** argv)
         printf("    %s: %.3f ms per frame (%d frames)\n",
                mode == "snowperf" ? "snow at 100%, snowfall 100%" : mode == "snowperf0" ? "snow off"
                : mode == "dirtperf" ? "dirt detail" : mode == "rainperf" ? "rain at 100%, puddles 80%"
+               : mode == "treefogperf" ? "rain, 800 see-through draws"
                : "dirt detail with Ultra graphics",
                timedMs / timedFrames, timedFrames);
     } else if (timing) {

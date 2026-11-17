@@ -43,6 +43,23 @@ void NoteObject(unsigned program, const float viewModel[16]);
 // ground and nothing else, which makes the ground mask for the dirt detail.
 void TerrainPassDone();
 
+// The sky is drawn: the window's image copied, so the sky is told from what's drawn over it without
+// depth (a track's distant hills, its trees). Called before the frame's first draw placed in the
+// world; WantsSkyShot says whether to (cheap: once a frame, only with a time of day or weather).
+bool WantsSkyShot();
+void SnapshotSky();
+
+// The first see-through draw (no depth written) placed in the world, after the terrain: the window's
+// image and depth copied, so what's drawn see-through (trees, dust) is told apart and the effects keep
+// off it.
+bool WantsSeeThroughShot();
+void SnapshotSeeThrough();
+// The see-through draws after it, held back and drawn again depth only (their own distance, for the
+// haze and fog): wanted this frame; and around the drawing again (false: not now).
+bool WantsSeeThroughDepth();
+bool BeginSeeThroughDepth();
+void EndSeeThroughDepth();
+
 // ---- Shadow maps: the game's own draw calls, repeated from the sun ----------------------------
 // While the 3D scene is drawn, every object's draw call is drawn a second time into a depth
 // texture seen from the sun (shadow map), with the same program and uniforms except its

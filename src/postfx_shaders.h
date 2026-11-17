@@ -170,6 +170,13 @@ uniform sampler2D u_terrainDepth;
 uniform sampler2D u_light;      // half resolution: AO, sun
 uniform sampler2D u_detail;     // tiling dirt detail: normal xy, height, albedo
 uniform sampler2D u_snowPuffs;  // tiling snow clumps: normal xy, height (MakeSnowPuffTexture)
+uniform sampler2D u_skyShot;    // the window's image once the game had drawn its sky (SnapshotSky)
+uniform float u_skyShotOn;
+uniform sampler2D u_seeShot;    // and at the first see-through draw after the terrain (SnapshotSeeThrough)
+uniform sampler2D u_seeDepth;
+uniform float u_seeShotOn;
+uniform sampler2D u_ownDepth;   // the see-through draws' own depth, drawn again into ours (SeeThroughDepth)
+uniform float u_ownDepthOn;
 uniform vec2  u_halfTexel;
 uniform float u_depthOk;        // depth and projection known: depth-based effects possible
 uniform float u_lightOn;
@@ -1163,6 +1170,23 @@ void main()
     vec3 c = pow(max(texture(u_color, v_uv).rgb, vec3(0.0)), vec3(2.2));
     float d = textureLod(u_depth, v_uv, 0.0).r;
     bool sky = u_depthOk > 0.5 && IsSky(d);
+    // Drawn over the sky without depth (a track's distant hills, its trees): not the sky, though nothing
+    // in the depth says so - what differs from the sky as the game drew it.
+    bool overSky = false;
+    if (sky && u_skyShotOn > 0.5) {
+        vec3 drawn = texture(u_color, v_uv).rgb, shot = textureLod(u_skyShot, v_uv, 0.0).rgb;
+        overSky = any(greaterThan(abs(drawn - shot), vec3(1.5 / 255.0)));
+        sky = !overSky;
+    }
+    // Drawn over something solid without depth (a tree's trunk and leaves, the game's own dust): the
+    // depth says whatever is behind it - the ground, a hill, a fence - and every effect that goes by
+    // depth (the dirt detail, ruts, wet and snow, shadows, AO, haze) went onto it: what's behind seen
+    // through the tree. What changed in colour since the first see-through draw, its depth as it was.
+    bool overGround = false;
+    if (!sky && !overSky && u_seeShotOn > 0.5 && abs(d - textureLod(u_seeDepth, v_uv, 0.0).r) < 1e-7) {
+        vec3 drawn = texture(u_color, v_uv).rgb, shot = textureLod(u_seeShot, v_uv, 0.0).rgb;
+        overGround = any(greaterThan(abs(drawn - shot), vec3(1.5 / 255.0)));
+    }
 
     // In uniform control flow, for the detail texture's mip selection.
     vec3 p = ViewPos(v_uv, min(d, 0.99999));
@@ -1174,6 +1198,34 @@ void main()
 
     if (sky) {
         c = SkyLook(c, dir);
+    } else if (overSky || overGround) {
+        // Its own look, lit by the time of day as the ground is, hazed as far off as it is: where its draw
+        // was repeated into a depth of ours (SeeThroughDepth), its own distance - the whole tree alike.
+        // Where not (a draw that couldn't be repeated): over the sky, half the haze or fog a far hill
+        // gets; over the ground, as far as what's behind it, the most it can be. (That alone outlined
+        // the fence and the ground's far edge behind a tree through its leaves, in rain and snow: its
+        // top hazed as the far hill behind, its foot as the near ground.)
+        float zBehind = -p.z;
+        float zOwn = -1.0;
+        if (u_ownDepthOn > 0.5) {
+            float od = textureLod(u_ownDepth, v_uv, 0.0).r;
+            if (od < 1.0)
+                zOwn = -ViewPos(v_uv, od).z;
+        }
+        bool known = zOwn > 0.0;
+        float zIt = known ? (overSky ? zOwn : min(zOwn, zBehind)) : zBehind;
+        bool guessed = overSky && !known;
+        if (u_tod > 0.5) {
+            c *= u_tint * u_exposure;
+            c = mix(c, vec3(Luma(c)), u_desaturate);
+            c = mix(c, HazeColour(dir), guessed ? 0.45 * u_haze : (1.0 - exp(-zIt / (450.0 * u_metre))) * 0.8 * u_haze);
+        }
+        if (u_overcast > 0.0) {
+            c = mix(c, vec3(Luma(c)) * vec3(0.96, 0.99, 1.04), 0.25 * u_overcast);
+            c *= 1.0 - 0.15 * u_rain;
+            c = mix(c, u_weatherFog + u_flashColour * (0.3 * u_flash),
+                    (guessed ? 0.5 : 0.5 * (1.0 - exp(-zIt / (75.0 * u_metre)))) * 0.7 * u_weatherHaze * u_overcast);
+        }
     } else {
         float z = -p.z;
         vec3 albedo = c;  // what the headlight lights: the surface before the sun's shadows
@@ -1316,7 +1368,10 @@ void main()
             c *= u_tint * u_exposure;
             c = mix(c, vec3(Luma(c)), u_desaturate);
             if (u_depthOk > 0.5)
-                c = mix(c, HazeColour(dir), (1.0 - exp(-z / 350.0)) * u_haze);
+                // (Thin, and far: half of it ~340 m off. At 350 game units - ~107 m - a berm across the track
+                // went flat with it, a hard line along its top against the trees, and a tree in front of it -
+                // drawn without depth, so taken for the berm - was hazed see-through.)
+                c = mix(c, HazeColour(dir), (1.0 - exp(-z / (450.0 * u_metre))) * 0.8 * u_haze);
         }
         // (Wet ground and puddles: their reflection, graded already.)
         if (rainReflW > 0.0)
@@ -1328,7 +1383,10 @@ void main()
             c *= 1.0 - 0.15 * u_rain;
             if (u_depthOk > 0.5)
                 c = mix(c, u_weatherFog + u_flashColour * (0.3 * u_flash),
-                        (1.0 - exp(-z / (90.0 * u_metre))) * 0.7 * u_weatherHaze * u_overcast);
+                        0.5 * (1.0 - exp(-z / (75.0 * u_metre))) * 0.7 * u_weatherHaze * u_overcast);
+                // (As thick up close as 1-exp(-z/150 m) was, but levelling off at what the depthless hills and
+                // trees beyond the ground get (0.5): rising on to 0.7 of it, the far ground was a white wall
+                // foggier than the hills behind it, its top a hard line, the trees over it veiled.)
         }
         if (u_headlight > 0.0)
             c += Headlight(albedo, p, nView);
@@ -1337,7 +1395,7 @@ void main()
             // strike. (Fading with the haze: the distance is lit as the haze is, above.)
             vec3 nW = u_viewToWorld * nView;
             float lit = 0.5 + 0.4 * dot(nW, u_up) + 0.35 * max(dot(nW, u_flashDir), 0.0);
-            float clear = u_depthOk > 0.5 ? exp(-z / (90.0 * u_metre) * u_weatherHaze) : 1.0;
+            float clear = u_depthOk > 0.5 ? exp(-z / (150.0 * u_metre) * u_weatherHaze) : 1.0;
             c += albedo * u_flashColour * (1.5 * u_flash * lit * clear);
         }
     }

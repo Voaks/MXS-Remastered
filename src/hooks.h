@@ -17,6 +17,10 @@ void* GetRealGLFunction(const char* name);
 // True when the game window is the foreground window (hotkeys are ignored otherwise).
 bool GameHasFocus();
 
+// Out on a track (riding, spectating, a replay): the game's 3D camera seen in the last half second -
+// not in its menus.
+bool OnTrack();
+
 struct HookEntry {
     const char* name;      // export name, e.g. "glLoadMatrixf"
     void*       hook;      // our replacement, which the export stub will jump to
@@ -66,6 +70,8 @@ void NoteCapability(unsigned int capability, bool on);  // GLenum
 // shadows are applied: one switch of framebuffer and state instead of one per object. Called by
 // postfx; Discard drops them (a frame that wasn't applied).
 void FlushShadowCasters();
+// The see-through draws held back this frame, drawn again for their own depth (postfx).
+void FlushSeeThroughDepth();
 void DiscardShadowCasters();
 
 // Called once per frame by the swap hook. Returns true if the shader path found the camera

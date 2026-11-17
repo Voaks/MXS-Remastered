@@ -99,6 +99,7 @@
     <ClCompile Include="src\config.cpp" />
     <ClCompile Include="src\brake.cpp" />
     <ClCompile Include="src\thunder.cpp" />
+    <ClCompile Include="src\setups.cpp" />
     <ClCompile Include="src\dab.cpp" />
     <ClCompile Include="src\gamepad.cpp" />
     <ClCompile Include="src\lobby_wheels.cpp" />
@@ -122,6 +123,7 @@
     <ClInclude Include="src\config.h" />
     <ClInclude Include="src\brake.h" />
     <ClInclude Include="src\thunder.h" />
+    <ClInclude Include="src\setups.h" />
     <ClInclude Include="src\lightning_sounds.h" />
     <ClInclude Include="src\rain_sound.h" />
     <ClInclude Include="src\snow_sound.h" />

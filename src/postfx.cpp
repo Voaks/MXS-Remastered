@@ -310,7 +310,7 @@ void DrainErrors()
 // ===========================================================================
 // Saved GL state
 // ===========================================================================
-constexpr int kUnits = 9;  // texture units the passes use
+constexpr int kUnits = 13;  // texture units the passes use
 
 struct SavedState {
     GLint     program = 0, vao = 0, arrayBuffer = 0, activeTexture = 0, readFb = 0, drawFb = 0, readBuffer0 = 0;
@@ -473,7 +473,12 @@ struct Resources {
     GLuint  snowPuffs = 0;   // the snow's clumps (MakeSnowPuffTexture)
     int     width = 0, height = 0;
     GLuint  captureFbo = 0, color = 0, depth = 0;  // the window's image
+    GLuint  skyShot = 0;                           // the window's image once the sky is drawn (SnapshotSky)
+    GLuint  skyShotFbo = 0, seeShotFbo = 0;        // (their images' framebuffers: copied in by a blit)
     GLuint  terrainFbo = 0, terrainDepth = 0;      // depth when the terrain pass ended
+    GLuint  seeFbo = 0, seeDepth = 0, seeShot = 0;  // depth and image at the first see-through draw (SnapshotSeeThrough)
+    GLuint  ownFbo = 0, ownDepth = 0;              // the see-through draws again, depth only (BeginSeeThroughDepth)
+    bool    ownOk = false;                         // (its framebuffer complete)
     GLuint  sampleFbo = 0, sampleDepth = 0;        // that depth, downsampled, to read back
     int     samplePacking = -1;                    // the depth format it was made in (depthMode's)
     bool    sampleFailed = false;                  // reading it back didn't work: tried once
@@ -529,6 +534,11 @@ WheelMaskState g_wheelMask;
 
 // ---- Per-frame scene information (from the hooks) -----------------------------------------
 struct Frame {
+    bool   skyTried = false, skyShot = false;  // this frame's picture of the sky asked for, and taken (SnapshotSky)
+    bool   seeTried = false, seeShot = false;  // and at the first see-through draw after it (SnapshotSeeThrough)
+    bool   ownDepth = false;                   // the see-through draws' own depth drawn (BeginSeeThroughDepth)
+    signed char ownWanted = -1;                // and wanted this frame (WantsSeeThroughDepth: -1 not asked yet)
+    bool   terrainDone = false;                // the game's terrain pass over this frame (TerrainPassDone called)
     bool   haveView = false;
     double raw[16] = {}, rendered[16] = {};
     bool   applied = false;
@@ -909,7 +919,7 @@ bool MakeTarget(Target& t, int w, int h, GLint internal, GLenum format, GLenum t
 bool MakeDepthTextures()
 {
     const bool packed = g_res.depthMode <= 1;
-    for (GLuint* tex : { &g_res.depth, &g_res.terrainDepth }) {
+    for (GLuint* tex : { &g_res.depth, &g_res.terrainDepth, &g_res.seeDepth, &g_res.ownDepth }) {
         if (*tex)
             g_gl.DeleteTextures(1, tex);
         *tex = packed ? NewTexture(kDepth24Stencil8, g_res.width, g_res.height, kDepthStencil, kUnsignedInt248, GL_NEAREST)
@@ -928,7 +938,18 @@ bool MakeDepthTextures()
     g_gl.DrawBuffer(GL_NONE);  // depth only (framebuffer object state, not the window's)
     g_gl.ReadBuffer(GL_NONE);
     const bool terrain = g_gl.CheckFramebufferStatus(kFramebuffer) == kFramebufferComplete;
-    return capture && terrain;
+    g_gl.BindFramebuffer(kFramebuffer, g_res.seeFbo);
+    g_gl.FramebufferTexture2D(kFramebuffer, other, GL_TEXTURE_2D, 0, 0);
+    g_gl.FramebufferTexture2D(kFramebuffer, attachment, GL_TEXTURE_2D, g_res.seeDepth, 0);
+    g_gl.DrawBuffer(GL_NONE);
+    g_gl.ReadBuffer(GL_NONE);
+    g_gl.BindFramebuffer(kFramebuffer, g_res.ownFbo);
+    g_gl.FramebufferTexture2D(kFramebuffer, other, GL_TEXTURE_2D, 0, 0);
+    g_gl.FramebufferTexture2D(kFramebuffer, attachment, GL_TEXTURE_2D, g_res.ownDepth, 0);
+    g_gl.DrawBuffer(GL_NONE);
+    g_gl.ReadBuffer(GL_NONE);
+    g_res.ownOk = g_gl.CheckFramebufferStatus(kFramebuffer) == kFramebufferComplete;
+    return capture && terrain;  // (the see-through one optional: SnapshotSeeThrough checks its own copy)
 }
 
 bool MakeSizedTargets(int w, int h)
@@ -940,10 +961,26 @@ bool MakeSizedTargets(int w, int h)
     if (g_res.color)
         g_gl.DeleteTextures(1, &g_res.color);
     g_res.color = NewTexture(GL_RGBA8, w, h, GL_RGBA, GL_UNSIGNED_BYTE, GL_LINEAR);
+    if (g_res.skyShot)
+        g_gl.DeleteTextures(1, &g_res.skyShot);
+    g_res.skyShot = NewTexture(GL_RGBA8, w, h, GL_RGBA, GL_UNSIGNED_BYTE, GL_NEAREST);
     if (!g_res.captureFbo)
         g_gl.GenFramebuffers(1, &g_res.captureFbo);
     if (!g_res.terrainFbo)
         g_gl.GenFramebuffers(1, &g_res.terrainFbo);
+    if (!g_res.seeFbo)
+        g_gl.GenFramebuffers(1, &g_res.seeFbo);
+    if (!g_res.ownFbo)
+        g_gl.GenFramebuffers(1, &g_res.ownFbo);
+    if (g_res.seeShot)
+        g_gl.DeleteTextures(1, &g_res.seeShot);
+    g_res.seeShot = NewTexture(GL_RGBA8, w, h, GL_RGBA, GL_UNSIGNED_BYTE, GL_NEAREST);
+    for (GLuint* fbo : { &g_res.skyShotFbo, &g_res.seeShotFbo }) {
+        if (!*fbo)
+            g_gl.GenFramebuffers(1, fbo);
+        g_gl.BindFramebuffer(kFramebuffer, *fbo);
+        g_gl.FramebufferTexture2D(kFramebuffer, kColorAttachment0, GL_TEXTURE_2D, fbo == &g_res.skyShotFbo ? g_res.skyShot : g_res.seeShot, 0);
+    }
     g_gl.BindFramebuffer(kFramebuffer, g_res.captureFbo);
     g_gl.FramebufferTexture2D(kFramebuffer, kColorAttachment0, GL_TEXTURE_2D, g_res.color, 0);
     if (g_res.depthMode < 0)
@@ -1067,7 +1104,7 @@ bool CaptureDepth(GLuint fbo, GLuint tex)
             return false;
         }
         MakeDepthTextures();
-        tex = fbo == g_res.captureFbo ? g_res.depth : g_res.terrainDepth;
+        tex = fbo == g_res.captureFbo ? g_res.depth : fbo == g_res.seeFbo ? g_res.seeDepth : g_res.terrainDepth;
     }
     return false;
 }
@@ -6564,6 +6601,13 @@ void Render(int w, int h)
         Bind(p, "u_light", 3, g_res.light.tex);
         Bind(p, "u_detail", 4, g_res.detail);
         Bind(p, "u_snowPuffs", 8, g_res.snowPuffs);
+        Bind(p, "u_skyShot", 9, g_res.skyShot);
+        g_gl.Uniform1f(p["u_skyShotOn"], g_frame.skyShot ? 1.0f : 0.0f);
+        Bind(p, "u_seeShot", 10, g_res.seeShot);
+        Bind(p, "u_seeDepth", 11, g_res.seeDepth);
+        g_gl.Uniform1f(p["u_seeShotOn"], g_frame.seeShot ? 1.0f : 0.0f);
+        Bind(p, "u_ownDepth", 12, g_res.ownDepth);
+        g_gl.Uniform1f(p["u_ownDepthOn"], g_frame.seeShot && g_frame.ownDepth ? 1.0f : 0.0f);
         // Always on its own unit: a shadow sampler may not share one with an ordinary sampler.
         Bind(p, "u_shadowMap", 5, g_res.shadowMap);
         g_gl.Uniform1f(p["u_shadowMapOn"], shadowMapOn ? 1.0f : 0.0f);
@@ -7492,11 +7536,13 @@ void ApplyInner()
     g_wheelDrawnByGame[0] = g_wheelDrawnByGame[1] = false;
     g_wheelMask.cleared = g_wheelMask.drawn = false;
     if (!WindowSize(w, h)) {
+        FlushSeeThroughDepth();
         FlushShadowCasters();
         return;
     }
     UnderstandScene();
     TimerBegin(0);
+    FlushSeeThroughDepth();  // (first: the casters' uniform copies are let go after them)
     FlushShadowCasters();  // the held-back shadow casters, all at once, before the shadows are used
     TimerEnd(0);
     TimerBegin(1);
@@ -7577,6 +7623,12 @@ struct ShadowSaved {
 };
 ShadowSaved g_shadowSaved;
 bool g_loggedShadowCasters = false;
+struct OwnSaved {
+    ShadowSaved shadow;
+    GLboolean   colorMask[4] = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+    bool        cull = false, polygonOffset = false;
+};
+OwnSaved g_ownSaved;
 
 }  // namespace
 
@@ -7951,8 +8003,184 @@ bool OverrideLight(const float* value, int count, int components, float* out)
     return true;
 }
 
+// ---- The sky, as the game drew it ---------------------------------------------------------------
+// The sky was told by depth alone: nothing drawn there. But a track's distant hills and its trees are
+// drawn without writing depth too - and were painted over as sky: the time of day's dusk glow made
+// them orange ghosts, the weather's overcast grey ones, with a hard line along where the ground (which
+// does write depth) begins. So the window's image is copied once the game has drawn its sky - before
+// the first thing placed in the world (proc_hooks) - and only what's still as it was then is the sky.
+// The window's image (its back buffer) into fbo's colour, as CaptureColor does: a blit (fast), or
+// where blits don't work, a copy into tex.
+void CopyWindowImage(GLuint fbo, GLuint tex, int w, int h)
+{
+    g_gl.BindFramebuffer(kReadFramebuffer, 0);
+    g_gl.ReadBuffer(GL_BACK);
+    if (g_res.colorMode == 1) {
+        g_gl.BindFramebuffer(kDrawFramebuffer, fbo);
+        g_gl.BlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    } else {
+        g_gl.ActiveTexture(kTexture0);
+        g_gl.BindTexture(GL_TEXTURE_2D, tex);
+        g_gl.CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+    }
+}
+
+bool WantsSkyShot()
+{
+    const Config& cfg = GetConfig();
+    static const bool off = GetEnvironmentVariableA("MXCAM_TEST_NO_SKYSHOT", nullptr, 0) > 0;  // (tests: the old way)
+    return !off && !g_frame.skyTried && cfg.shaders && (cfg.timeOfDay >= 0.0 || cfg.weather != kWeatherNone) && !g_res.failed;
+}
+
+void SnapshotSky()
+{
+    if (!WantsSkyShot() || !LoadGL())
+        return;
+    g_frame.skyTried = true;  // (once a frame)
+    GLint drawFb = 0;
+    g_gl.GetIntegerv(kDrawFramebufferBinding, &drawFb);
+    if (drawFb != 0)
+        return;  // (drawn into a texture of the game's own: not the scene)
+    int w = 0, h = 0;
+    if (!WindowSize(w, h))
+        return;
+    SavedState saved;
+    Save(saved);
+    PrepareState();
+    if (EnsureResources(w, h) && g_res.skyShot) {
+        CopyWindowImage(g_res.skyShotFbo, g_res.skyShot, w, h);
+        g_frame.skyShot = true;
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("postfx: the sky is read as the game drew it (what's drawn over it without depth - distant hills, trees - "
+                "keeps its own look)");
+        }
+    }
+    Restore(saved);
+}
+
+// ---- What's solid, before anything see-through is drawn over it -----------------------------------
+// The game draws its trees' leaves and trunks, its dust and smoke without writing depth. Every effect
+// that goes by depth - the shadows, AO, haze and fog, the wet, the ground's own - then took a tree for
+// whatever is behind it: the hill's shading, a fence's shadow, the dirt seen through the trunk. So the
+// window's image and depth are copied at the first see-through draw after the terrain (everything solid
+// drawn by then, as a rule); what's later changed in colour where the depth stayed the same had
+// something see-through drawn over it, and keeps its own look (the composite's overDrawn).
+bool WantsSeeThroughShot()
+{
+    const Config& cfg = GetConfig();
+    static const bool off = GetEnvironmentVariableA("MXCAM_TEST_NO_SEESHOT", nullptr, 0) > 0;  // (tests: the old way)
+    return !off && !g_frame.seeTried && g_frame.terrainDone && cfg.shaders && !g_res.failed && g_frame.haveView && !g_frame.applied;
+}
+
+void SnapshotSeeThrough()
+{
+    if (!WantsSeeThroughShot() || !LoadGL())
+        return;
+    g_frame.seeTried = true;
+    GLint drawFb = 0;
+    g_gl.GetIntegerv(kDrawFramebufferBinding, &drawFb);
+    if (drawFb != 0)
+        return;
+    int w = 0, h = 0;
+    if (!WindowSize(w, h))
+        return;
+    SavedState saved;
+    Save(saved);
+    PrepareState();
+    if (EnsureResources(w, h) && g_res.seeShot && g_res.seeFbo && CaptureDepth(g_res.seeFbo, g_res.seeDepth)) {
+        CopyWindowImage(g_res.seeShotFbo, g_res.seeShot, w, h);
+        g_frame.seeShot = true;
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("postfx: what's drawn see-through (trees, dust) is told apart: the effects keep off it");
+        }
+    }
+    Restore(saved);
+}
+
+// ---- What's see-through, its own distance --------------------------------------------------------
+// The see-through draws (trees, dust) write no depth, so how far off they are wasn't known: a tree was
+// hazed and fogged as what's behind it - its top as the far hill, its foot as the near ground, and in
+// rain and snow the fence and the ground's far edge behind it showed through its leaves as that step.
+// So the draws after the first see-through one are held back as drawn (proc_hooks: their program,
+// matrices and uniforms) and drawn again, depth only, into a depth of ours before the effects: one
+// switch of framebuffer for them all, as the shadow map's held-back casters are.
+bool WantsSeeThroughDepth()
+{
+    const Config& cfg = GetConfig();
+    static const bool off = GetEnvironmentVariableA("MXCAM_TEST_NO_OWNDEPTH", nullptr, 0) > 0;  // (tests: the old way)
+    if (off || !g_frame.seeShot || g_frame.applied || !cfg.shaders || g_res.failed || !g_res.ownOk)
+        return false;
+    // Only with something to haze them by: weather's fog, or a time of day's haze (none by day).
+    if (g_frame.ownWanted < 0)
+        g_frame.ownWanted = cfg.weather != kWeatherNone || (cfg.timeOfDay >= 0.0 && CurrentSky().haze > 0.001) ? 1 : 0;
+    return g_frame.ownWanted > 0;
+}
+
+bool BeginSeeThroughDepth()
+{
+    if (!g_frame.seeShot || !g_res.ownOk || !LoadGL())
+        return false;
+    GLint drawFb = 0;
+    g_gl.GetIntegerv(kDrawFramebufferBinding, &drawFb);
+    if (drawFb != 0)
+        return false;
+    OwnSaved& s = g_ownSaved;
+    s.shadow.drawFb = drawFb;
+    g_gl.GetIntegerv(GL_VIEWPORT, s.shadow.viewport);
+    g_gl.GetIntegerv(GL_DEPTH_FUNC, &s.shadow.depthFunc);
+    g_gl.GetBooleanv(GL_DEPTH_WRITEMASK, &s.shadow.depthMask);
+    g_gl.GetBooleanv(GL_COLOR_WRITEMASK, s.colorMask);
+    s.shadow.depthTest   = g_gl.IsEnabled(GL_DEPTH_TEST) != GL_FALSE;
+    s.shadow.scissorTest = g_gl.IsEnabled(GL_SCISSOR_TEST) != GL_FALSE;
+    s.shadow.stencilTest = g_gl.IsEnabled(GL_STENCIL_TEST) != GL_FALSE;
+    s.cull               = g_gl.IsEnabled(GL_CULL_FACE) != GL_FALSE;
+    s.polygonOffset      = g_gl.IsEnabled(GL_POLYGON_OFFSET_FILL) != GL_FALSE;
+    g_gl.BindFramebuffer(kDrawFramebuffer, g_res.ownFbo);
+    // (The viewport the game drew the scene with, as it stands; its depth range too: the same depth
+    // as the window's, compared with it.)
+    g_gl.Enable(GL_DEPTH_TEST);
+    g_gl.DepthFunc(GL_LESS);
+    g_gl.DepthMask(GL_TRUE);
+    g_gl.ColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    g_gl.Disable(GL_SCISSOR_TEST);
+    g_gl.Disable(GL_STENCIL_TEST);
+    g_gl.Disable(GL_CULL_FACE);  // (both faces: leaves are two-sided)
+    g_gl.Disable(GL_POLYGON_OFFSET_FILL);
+    GLfloat clearDepth = 1.0f;
+    g_gl.GetFloatv(GL_DEPTH_CLEAR_VALUE, &clearDepth);
+    g_gl.ClearDepth(1.0);
+    g_gl.Clear(GL_DEPTH_BUFFER_BIT);
+    g_gl.ClearDepth(clearDepth);
+    g_frame.ownDepth = true;
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        Log("postfx: what's see-through (trees) is drawn again for its own depth: hazed and fogged as far off as it is");
+    }
+    return true;
+}
+
+void EndSeeThroughDepth()
+{
+    const OwnSaved& s = g_ownSaved;
+    g_gl.BindFramebuffer(kDrawFramebuffer, s.shadow.drawFb);
+    g_gl.DepthFunc(s.shadow.depthFunc);
+    g_gl.DepthMask(s.shadow.depthMask);
+    g_gl.ColorMask(s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]);
+    SetCapability(GL_DEPTH_TEST, s.shadow.depthTest);
+    SetCapability(GL_SCISSOR_TEST, s.shadow.scissorTest);
+    SetCapability(GL_STENCIL_TEST, s.shadow.stencilTest);
+    SetCapability(GL_CULL_FACE, s.cull);
+    SetCapability(GL_POLYGON_OFFSET_FILL, s.polygonOffset);
+}
+
 void TerrainPassDone()
 {
+    g_frame.terrainDone = true;
     const Config& cfg = GetConfig();
     if (!cfg.shaders || (cfg.dirtDetail <= 0.0 && cfg.tireMarks <= 0.0 && TireCoat(cfg) <= 0.0 && cfg.weather == kWeatherNone && !RoostOn(cfg)) || !g_frame.haveView || g_frame.terrainSnapshot || g_frame.applied ||
         g_res.failed || !LoadGL())

@@ -44,6 +44,7 @@
 #include "mathlib.h"
 #include "overlay.h"
 #include "paths.h"
+#include "setups.h"
 #include "postfx.h"
 #include "replay.h"
 #include "sound_packs.h"
@@ -1332,9 +1333,9 @@ RowDef PadRow(int tab, const char* section, const char* label, int Config::* con
     return def;
 }
 
-const char* const kTabs[] = { "FIRST PERSON", "LOOK", "GRAPHICS", "WEATHER", "REPLAY", "KEYBINDS", "SOUNDS", "OTHER" };
+const char* const kTabs[] = { "FIRST PERSON", "LOOK", "GRAPHICS", "WEATHER", "REPLAY", "KEYBINDS", "SOUNDS", "OTHER", "SETUPS" };
 constexpr int kTabFirstPerson = 0, kTabLook = 1, kTabGraphics = 2, kTabWeather = 3, kTabReplay = 4, kTabKeybinds = 5,
-              kTabSounds = 6, kTabOther = 7;
+              kTabSounds = 6, kTabOther = 7, kTabSetups = 8;  // (SETUPS: no rows of its own - the game's setups, setups.h)
 constexpr int kTabCount = static_cast<int>(sizeof kTabs / sizeof kTabs[0]);
 // Preset codes (config.cpp) number their tab themselves - 0 the first person camera's, 1 the
 // graphics' - as they always have (codes already shared keep loading), whatever order the menu's
@@ -1758,6 +1759,10 @@ struct PanelState {
     bool   resizing     = false;      // its corner being dragged
     bool   notes        = false;      // the patch notes shown in the box instead of the settings
     int    notesPage    = 0;          // which version's (0: the newest)
+    std::string setupName;            // SETUPS: the new setup's name being typed
+    bool   setupNameFocus = false;    // (typing it)
+    std::string setupConfirm;         // SETUPS: a setup to overwrite, its SAVE clicked once (again within 3 s: done)
+    double setupConfirmAt = -10;
     float  resizeScale = 1, resizeW = 0, resizeH = 0, resizeX = 0, resizeY = 0;  // when that began: the size, the mouse
     float  baseScale    = 1.0f;       // this window's usual scale, and the biggest the whole panel fits at
     float  fitScale     = 1.0f;
@@ -2025,6 +2030,11 @@ bool    g_windowUnicode  = true;
 #ifdef _WIN32
 LRESULT CALLBACK PanelWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    // (The mod's own typing into the game's console - a setup loaded or saved - goes straight on,
+    // first: its Esc that closes the console isn't counted as the game's menu opening.)
+    if ((message == WM_KEYDOWN || message == WM_KEYUP || message == WM_CHAR) && setups::Injected(static_cast<long long>(lParam)))
+        return g_windowUnicode ? CallWindowProcW(g_previousProc, window, message, wParam, lParam)
+                               : CallWindowProcA(g_previousProc, window, message, wParam, lParam);
     // Esc going down for the game (not held, not to this panel, which keeps presses to itself): the
     // game's menu opens or closes (Config::hideHud shows the HUD with it).
     if (message == WM_KEYDOWN) {
@@ -3247,7 +3257,7 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
             g_panel.tab = (g_panel.tab + in.step + kTabCount) % kTabCount;
             ClearSearch();
         }
-        const float itemH = S(56), barH = S(50), top = boxY + S(6);
+        const float itemH = S(48), barH = S(43), top = boxY + S(4);
         {
             const double dt = g_panel.tabBarTime > 0 ? Clamp(now - g_panel.tabBarTime, 0.0, 0.1) : 0.0;
             g_panel.tabBarTime = now;
@@ -3330,6 +3340,11 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
     // The patch notes: a row of the versions along the top of the box (one page each), the chosen one's
     // notes under it, scrolled.
     const float notesBarH = S(64);
+    // SETUPS: a strip along the top for a new one (its name, SAVE AS NEW), the game's setups under it.
+    const bool setupsPage = g_panel.tab == kTabSetups && !g_panel.notes && !searching;
+    const std::vector<setups::Setup>& setupList = setups::List(now);
+    if (setupsPage)
+        listH = notesBarH + S(14) + std::max<size_t>(setupList.size(), 1) * rowH + S(30);
     if (g_panel.notes) {
         ReadNotes();
         g_panel.notesPage = Clamp(g_panel.notesPage, 0, std::max(0, static_cast<int>(g_notePages.size()) - 1));
@@ -3581,7 +3596,100 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
                  by + std::round((bh - LineHeight(kFontLabel)) * 0.5f), name, chosen || hot ? White(1.0f) : kLabel, 0);
             bx += bw + gapX;
         }
-    } else if (rowsShown == 0) {
+    } else if (setupsPage) {
+        float ly = boxY + notesBarH + S(14) - g_panel.scroll;
+        // (Off a track - in the game's menus - its console isn't there to take the commands: the buttons wait.)
+        const bool busy = setups::Busy() || !OnTrack();
+        const auto Button = [&](float bx, float by, float bw, float bh, const char* label, bool primary, bool enabled) {
+            const bool hot = enabled && in.Inside(bx, by, bw, bh) && in.Inside(boxX, boxY + notesBarH, boxW, boxH - notesBarH);
+            RoundedRect(bx, by, bw, bh, S(5),
+                        !enabled ? Rgba(26, 26, 29, 1.0f) : primary ? (hot ? kAccentHot : kAccent) : (hot ? Rgba(58, 58, 64, 1.0f) : Rgba(34, 34, 38, 1.0f)));
+            const float tw = TextWidth(kFontSmall, label, S(2));
+            Text(kFontSmall, bx + std::round((bw - tw) * 0.5f), by + std::round((bh - LineHeight(kFontSmall)) * 0.5f), label,
+                 !enabled ? kDim : White(1.0f), S(2));
+            return hot && in.pressed;
+        };
+        for (const setups::Setup& setup : setupList) {
+            if (ly + rowH >= boxY + notesBarH && ly <= boxB) {
+                const bool current = setup.name == setups::Current();
+                if (current)
+                    GradientH(boxX, ly, std::round(boxW * 0.6f), rowH, Rgba(206, 18, 26, 0.22f), Rgba(206, 18, 26, 0.0f));
+                const float ty = ly + std::round((rowH - LineHeight(kFontLabel)) * 0.5f);
+                Text(kFontLabel, cx, ty, setup.name.c_str(), White(1.0f), 0);
+                if (!setup.bike.empty())
+                    Text(kFontSmall, cx + std::fmax(S(220), TextWidth(kFontLabel, setup.name.c_str(), 0) + S(24)),
+                         ly + std::round((rowH - LineHeight(kFontSmall)) * 0.5f), setup.bike.c_str(), kDim, S(1));
+                const float bh = S(32), by = ly + std::round((rowH - bh) * 0.5f), bw = S(96);
+                const bool confirming = g_panel.setupConfirm == setup.name && now - g_panel.setupConfirmAt < 3.0;
+                if (Button(right - bw, by, bw, bh, confirming ? "SURE?" : "SAVE", confirming, !busy)) {
+                    if (confirming) {
+                        setups::Save(setup.name, now);
+                        g_panel.setupConfirm.clear();
+                    } else {
+                        g_panel.setupConfirm = setup.name;
+                        g_panel.setupConfirmAt = now;
+                    }
+                }
+                if (Button(right - 2 * bw - S(10), by, bw, bh, "LOAD", true, !busy))
+                    setups::Load(setup.name, now);
+                OfferHelp("LOAD puts this setup on your bike (the game's /readsetup). SAVE writes the setup you're riding with "
+                          "over it (the game's /writesetup) - click it twice: the second time it says SURE?.",
+                          ly, ly + rowH, cx, cw, in.Inside(cx, ly, cw, rowH) && in.Inside(boxX, boxY + notesBarH, boxW, boxH - notesBarH),
+                          false);
+            }
+            Rect(cx, ly + rowH - std::fmax(1.0f, S(1)), cw, std::fmax(1.0f, S(1)), kLine);
+            ly += rowH;
+        }
+        if (setupList.empty())
+            Text(kFontLabel, cx, ly + std::round((rowH - LineHeight(kFontLabel)) * 0.5f),
+                 "No setups yet: type a name above and SAVE AS NEW to keep the one you're riding with.", kDim, 0);
+        // The strip along the top (the list scrolls under it): the new setup's name, and SAVE AS NEW.
+        Rect(boxX, boxY, boxW, notesBarH, Rgba(8, 8, 10, 1.0f));
+        Rect(cx, boxY + notesBarH - S(1), cw, std::fmax(1.0f, S(1)), kLine);
+        const float fh = S(36), fy = boxY + std::round((notesBarH - fh) * 0.5f);
+        const char* label = "NEW SETUP";
+        const float labelW = TextWidth(kFontSmall, label, S(2));
+        Text(kFontSmall, cx, fy + std::round((fh - LineHeight(kFontSmall)) * 0.5f), label, kSection, S(2));
+        const float fx = cx + labelW + S(16), saveW = S(170), fw = right - saveW - S(12) - fx;
+        const bool fieldHot = in.Inside(fx, fy, fw, fh);
+        if (in.pressed) {
+            if (fieldHot && !g_panel.setupNameFocus) {
+                g_panel.setupNameFocus = true;
+                ClearSearch();
+                PrimeTyping();
+            } else if (!fieldHot && g_panel.setupNameFocus) {
+                g_panel.setupNameFocus = false;
+            }
+        }
+        const bool valid = setups::ValidName(g_panel.setupName);
+        RoundedRect(fx - thin, fy - thin, fw + 2 * thin, fh + 2 * thin, S(5) + thin,
+                    g_panel.setupNameFocus ? kAccent : (fieldHot ? kOutline : Rgba(66, 66, 72, 1.0f)));
+        RoundedRect(fx, fy, fw, fh, S(5), Rgba(30, 30, 33, 1.0f));
+        const float tx = fx + S(12), tty = fy + std::round((fh - LineHeight(kFontValue)) * 0.5f);
+        if (g_panel.setupName.empty() && !g_panel.setupNameFocus)
+            Text(kFontValue, tx, tty, "Name it (letters, numbers, - _)", Rgba(120, 120, 126, 1.0f), 0);
+        else
+            Text(kFontValue, tx, tty, g_panel.setupName.c_str(), White(1.0f), 0);
+        if (g_panel.setupNameFocus && std::fmod(now, 1.0) < 0.6)
+            Rect(tx + TextWidth(kFontValue, g_panel.setupName.c_str(), 0) + S(2), tty, std::fmax(1.0f, S(2)), LineHeight(kFontValue),
+                 White(1.0f));
+        bool exists = false;
+        for (const setups::Setup& setup : setupList)
+            exists = exists || setup.name == g_panel.setupName;
+        const float sx = right - saveW;
+        const bool saveHot = valid && !busy && in.Inside(sx, fy, saveW, fh);
+        RoundedRect(sx, fy, saveW, fh, S(5), !valid || busy ? Rgba(26, 26, 29, 1.0f) : saveHot ? kAccentHot : kAccent);
+        const char* saveLabel = exists ? "SAVE OVER IT" : "SAVE AS NEW";
+        Text(kFontSmall, sx + std::round((saveW - TextWidth(kFontSmall, saveLabel, S(2))) * 0.5f),
+             fy + std::round((fh - LineHeight(kFontSmall)) * 0.5f), saveLabel, !valid || busy ? kDim : White(1.0f), S(2));
+        if (saveHot && in.pressed && setups::Save(g_panel.setupName, now)) {
+            g_panel.setupNameFocus = false;
+            g_panel.setupName.clear();
+        }
+        OfferHelp("Saves the setup you're riding with under this name (the game's /writesetup), in your setups folder "
+                  "(made for you the first time). Enter saves it too.",
+                  fy, fy + fh, fx, right - fx, fieldHot || saveHot, false);
+    } else if (rowsShown == 0 && searching) {
         char none[96];
         snprintf(none, sizeof none, "Nothing matches \"%s\"", g_panel.query.c_str());
         Text(kFontLabel, cx, boxY + S(30), none, kDim, 0);
@@ -3631,7 +3739,14 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
     {
         char readout[256];
         const camera::Telemetry& t = camera::LastTelemetry();
-        if (g_panel.notes) {
+        if (setupsPage) {
+            const char* status = setups::Status();
+            if (!OnTrack() && !setups::Busy())
+                snprintf(readout, sizeof readout, "SETUPS LOAD AND SAVE ON A TRACK: THE GAME'S CONSOLE ISN'T THERE IN ITS MENUS");
+            else
+                snprintf(readout, sizeof readout, "%s", status[0] ? status
+                         : "LOAD PUTS A SETUP ON YOUR BIKE   \xB7   SAVE WRITES THE ONE YOU'RE RIDING WITH");
+        } else if (g_panel.notes) {
             snprintf(readout, sizeof readout, "PATCH NOTES   \xB7   ARROW KEYS OR CLICK A VERSION   \xB7   CLICK A TAB TO GO BACK TO THE SETTINGS");
         } else if (searching) {
             snprintf(readout, sizeof readout, "%d SETTING%s FOUND   \xB7   ESC CLEARS THE SEARCH", rowsShown, rowsShown == 1 ? "" : "S");
@@ -4531,6 +4646,7 @@ void OverlayFrame(HDC dc)
     const HWND window = WindowFromDC(dc);
     g_gameWindow = window;
     NoteMouseActivity();
+    setups::Update(window, now);  // (a setup being loaded or saved: its command typed along)
     UpdateFullscreenWindow(window, cfg.fullscreenWindow);
     UpdateSoundPacks(now);
     // The game's cursor while riding (Config::hideCursor): if it's the system's, the window
@@ -4644,7 +4760,10 @@ void OverlayFrame(HDC dc)
         FinishRename(false, now);  // Esc while renaming: the name stays as it was, the menu open
     } else if (focus && escape && g_panel.listening < 0 && (g_panel.searchFocus || !g_panel.search.empty())) {
         ClearSearch();  // Esc with a search: the search goes, the menu stays
+    } else if (focus && escape && g_panel.setupNameFocus) {
+        g_panel.setupNameFocus = false;  // Esc while naming a setup: done typing, the menu stays
     } else if (g_panel.closeRequest || (focus && g_panel.listening < 0 && g_panel.renaming < 0 && !g_panel.searchFocus &&
+                                        !g_panel.setupNameFocus &&
                                         !g_panel.askSticky && !g_panel.askDefaults && !g_panel.askRestart &&
                                         (menuKey || escape))) {
         g_panel.askSticky = false;
@@ -4670,9 +4789,23 @@ void OverlayFrame(HDC dc)
         in.nav = in.step = 0;
         in.activate = false;
     }
-    if (g_panel.renaming >= 0 || g_panel.searchFocus) {
+    if (g_panel.renaming >= 0 || g_panel.searchFocus || g_panel.setupNameFocus) {
         // Keys type the name (or the search): none of them move around the menu.
-        if (g_panel.renaming >= 0) {
+        if (g_panel.setupNameFocus) {
+            // (A setup's name: what the game's command takes - no spaces: those become '_'.)
+            const bool entered = TypeInto(g_panel.setupName, 40, now);
+            std::string clean;
+            for (char c : g_panel.setupName)
+                if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == ' ')
+                    clean += c == ' ' ? '_' : c;
+            g_panel.setupName = clean;
+            if (!focus)
+                g_panel.setupNameFocus = false;
+            else if (entered && OnTrack() && setups::ValidName(g_panel.setupName) && setups::Save(g_panel.setupName, now)) {
+                g_panel.setupNameFocus = false;
+                g_panel.setupName.clear();
+            }
+        } else if (g_panel.renaming >= 0) {
             if (!focus || TypeInto(g_panel.nameDraft, kPresetNameMax, now))
                 FinishRename(true, now);
         } else if (!focus || TypeInto(g_panel.search, kSearchMax, now)) {

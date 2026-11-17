@@ -1,0 +1,314 @@
+// setups.cpp - see setups.h.
+//
+//   A command goes in three steps, a little apart, the way a hand would type it: the game's console
+//   key pressed (its key down, its character, its key up), the command's characters, then Enter. Each
+//   is a window message posted to the game's window, marked (lParam bit 25, which Windows leaves
+//   unused) so the menu's window procedure passes them on while it keeps the real keyboard's presses
+//   to itself. Then the game's own log (lastlog.txt in its personal folder) is read as it grows, for
+//   its answer ("Setup updated", "Setup written", or what went wrong), for a few seconds.
+#include "setups.h"
+
+#include <windows.h>
+#ifdef _WIN32
+#include <share.h>
+#endif
+
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+
+#include "log.h"
+#include "paths.h"
+
+namespace mxcam {
+namespace setups {
+namespace {
+
+constexpr long long kMarker = 1ll << 25;  // (a WM_KEY*/WM_CHAR lParam bit Windows leaves unused)
+
+std::vector<Setup> g_list;
+double g_listedAt = -10.0;
+std::string g_current;
+char g_status[160] = "";
+
+enum class Step { Idle, Console, Type, Enter, Wait };
+Step        g_step = Step::Idle;
+double      g_stepAt = 0;
+long long   g_frame = 0, g_stepFrame = 0;  // Update's calls (frames), and the one the last step was taken in
+std::string g_command, g_name;
+bool        g_writing = false;
+long long   g_logFrom = -1;  // lastlog.txt's size when the command was sent
+std::string g_answer;
+
+std::wstring Folder() { return std::wstring(paths::PersonalFolder()) + L"setups"; }
+
+std::string Upper(std::string text)
+{
+    for (char& c : text)
+        c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    return text;
+}
+
+long long LogSize()
+{
+    WIN32_FILE_ATTRIBUTE_DATA info;
+    std::wstring path = std::wstring(paths::PersonalFolder()) + L"lastlog.txt";
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info))
+        return -1;
+    return static_cast<long long>(info.nFileSizeHigh) << 32 | info.nFileSizeLow;
+}
+
+// What the game wrote to its log since the command (the lines with "setup" in them, or any error).
+std::string LogSince(long long from)
+{
+    std::wstring path = std::wstring(paths::PersonalFolder()) + L"lastlog.txt";
+    FILE* f = _wfsopen(path.c_str(), L"rb", _SH_DENYNO);
+    if (!f)
+        return "";
+    std::string text;
+    if (from > 0)
+        fseek(f, static_cast<long>(from), SEEK_SET);
+    char buffer[4096];
+    size_t got;
+    while ((got = fread(buffer, 1, sizeof buffer, f)) > 0 && text.size() < 65536)
+        text.append(buffer, got);
+    fclose(f);
+    std::string answer;
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos)
+            end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (!line.empty() && line[0] == '[') {  // "[1:21:18.13] Setup updated": its time left off
+            const size_t close = line.find("] ");
+            if (close != std::string::npos)
+                line.erase(0, close + 2);
+        }
+        const std::string upper = Upper(line);
+        if (upper.find("SETUP") != std::string::npos || upper.find("ERROR") != std::string::npos ||
+            upper.find("UNKNOWN") != std::string::npos || upper.find("CAN'T") != std::string::npos ||
+            upper.find("COULD") != std::string::npos)
+            answer = line;
+    }
+    return answer;
+}
+
+#ifdef _WIN32
+// The game's console key (its settings: console_key=(k)<key>), and the character it types.
+void ConsoleKey(UINT& vk, wchar_t& ch)
+{
+    vk = 'T';
+    ch = L't';
+    std::wstring path = std::wstring(paths::PersonalFolder()) + L"config";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f)
+        return;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        if (strncmp(line, "console_key=(k)", 15) != 0)
+            continue;
+        const char* key = line + 15;
+        if (key[0] && (key[1] == '\r' || key[1] == '\n' || key[1] == '\0')) {
+            const SHORT scan = VkKeyScanA(key[0]);
+            if (scan != -1) {
+                vk = scan & 0xFF;
+                ch = static_cast<wchar_t>(static_cast<unsigned char>(key[0]));
+            }
+        } else {
+            Log("setups: the console key \"%.*s\" isn't a single key: using T", static_cast<int>(strcspn(key, "\r\n")), key);
+        }
+        break;
+    }
+    fclose(f);
+}
+
+// A key pressed and let go: its key down and up only. The game's own message loop translates the key
+// down into its character (TranslateMessage), as for a key on the keyboard - a character posted along
+// with it arrived twice. (The first try typed "/writesetup test_1/writesetup test-1": every character
+// posted, then each again as translated - with Shift up there, '_' as '-' - and the game wrote a file
+// "writesetup test-1" in a new folder "test_1".)
+void Press(HWND window, UINT vk)
+{
+    const UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    PostMessageW(window, WM_KEYDOWN, vk, static_cast<LPARAM>(1 | scan << 16 | kMarker));
+    PostMessageW(window, WM_KEYUP, vk, static_cast<LPARAM>(1 | scan << 16 | kMarker | 0xC0000000ll));
+}
+
+// Text: its characters alone (no key downs to be translated again), exactly as written - Shift and
+// all, whatever the keyboard's state.
+void TypeText(HWND window, const std::string& text)
+{
+    for (char c : text) {
+        const SHORT scan = VkKeyScanA(c);
+        const UINT vsc = scan != -1 ? MapVirtualKeyW(scan & 0xFF, MAPVK_VK_TO_VSC) : 0;
+        PostMessageW(window, WM_CHAR, static_cast<WPARAM>(static_cast<unsigned char>(c)), static_cast<LPARAM>(1 | vsc << 16 | kMarker));
+    }
+}
+#endif
+
+bool Send(const std::string& name, bool writing, double now)
+{
+#ifdef _WIN32
+    if (g_step != Step::Idle && g_step != Step::Wait)
+        return false;
+    if (writing) {  // the setups folder, the first time
+        const std::wstring folder = Folder();
+        if (GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            if (CreateDirectoryW(folder.c_str(), nullptr))
+                Log("setups: made the setups folder (%ls)", folder.c_str());
+            else
+                Log("setups: couldn't make the setups folder %ls (error %lu)", folder.c_str(), GetLastError());
+        }
+    }
+    g_name = name;
+    g_writing = writing;
+    g_command = (writing ? "/writesetup " : "/readsetup ") + name;
+    g_step = Step::Console;
+    g_stepAt = now;
+    g_stepFrame = g_frame;
+    g_logFrom = LogSize();
+    g_answer.clear();
+    snprintf(g_status, sizeof g_status, "%s %s...", writing ? "SAVING" : "LOADING", Upper(name).c_str());
+    Log("setups: typing \"%s\" into the game's console", g_command.c_str());
+    return true;
+#else
+    (void)name;
+    (void)writing;
+    (void)now;
+    snprintf(g_status, sizeof g_status, "SETUPS FROM THE MENU AREN'T AVAILABLE ON LINUX YET");
+    return false;
+#endif
+}
+
+}  // namespace
+
+const std::vector<Setup>& List(double now)
+{
+    if (now - g_listedAt < 1.0)
+        return g_list;
+    g_listedAt = now;
+    g_list.clear();
+    if (!paths::PersonalFolder()[0])
+        return g_list;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(Folder()), error)) {
+        if (!entry.is_regular_file(error))
+            continue;
+        Setup s;
+        s.name = entry.path().filename().u8string();  // (as UTF-8: never throws on a name the code page lacks)
+        if (FILE* f = _wfsopen(entry.path().wstring().c_str(), L"rb", _SH_DENYNO)) {
+            char line[256];
+            while (fgets(line, sizeof line, f)) {
+                if (strncmp(line, "bike=", 5) == 0) {
+                    s.bike = line + 5;
+                    while (!s.bike.empty() && (s.bike.back() == '\n' || s.bike.back() == '\r'))
+                        s.bike.pop_back();
+                    break;
+                }
+            }
+            fclose(f);
+        }
+        g_list.push_back(s);
+    }
+    std::sort(g_list.begin(), g_list.end(), [](const Setup& a, const Setup& b) { return Upper(a.name) < Upper(b.name); });
+    return g_list;
+}
+
+bool ValidName(const std::string& name)
+{
+    if (name.empty() || name.size() > 40)
+        return false;
+    for (char c : name)
+        if (!isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_' && c != '.')
+            return false;
+    return name != "." && name != "..";
+}
+
+bool Load(const std::string& name, double now) { return Send(name, false, now); }
+bool Save(const std::string& name, double now) { return Send(name, true, now); }
+
+void Update(void* windowHandle, double now)
+{
+#ifdef _WIN32
+    HWND window = static_cast<HWND>(windowHandle);
+    if (g_step == Step::Idle || !window)
+        return;
+    const double since = now - g_stepAt;
+    ++g_frame;
+    // Each step a frame after the last (the fastest it goes: the game takes in the window's messages
+    // between its frames, so the console is open, its key's own character gone by, before the text is
+    // typed): the console is up for only three or four frames - all but unseen.
+    const bool nextFrame = g_frame > g_stepFrame;
+    const auto Took = [&]() { g_stepAt = now; g_stepFrame = g_frame; };
+    switch (g_step) {
+    case Step::Console: {  // the console opened
+        UINT vk;
+        wchar_t ch;
+        ConsoleKey(vk, ch);
+        Press(window, vk);
+        g_step = Step::Type;
+        Took();
+        break;
+    }
+    case Step::Type:  // the command typed into it (a moment later: it's open)
+        if (!nextFrame)
+            break;
+        TypeText(window, g_command);
+        g_step = Step::Enter;
+        Took();
+        break;
+    case Step::Enter:
+        if (!nextFrame)
+            break;
+        Press(window, VK_RETURN);
+        g_step = Step::Wait;
+        Took();
+        break;
+    case Step::Wait: {  // the game's answer, in its log
+        const std::string answer = LogSince(g_logFrom);
+        if (!answer.empty() && answer != g_answer) {
+            g_answer = answer;
+            const std::string upper = Upper(answer);
+            const bool done = upper.find(g_writing ? "WRITTEN" : "UPDATED") != std::string::npos;
+            if (done) {
+                g_current = g_name;
+                g_listedAt = -10.0;  // (a new one in the list)
+                snprintf(g_status, sizeof g_status, "%s %s", g_writing ? "SAVED YOUR SETUP AS" : "LOADED", Upper(g_name).c_str());
+            } else {
+                snprintf(g_status, sizeof g_status, "THE GAME SAYS: %s", upper.c_str());
+            }
+            Log("setups: the game answered \"%s\"", answer.c_str());
+            // It answered: its console took the command and is still open - closed at once (Esc in it goes
+            // back to the game; the user's test). Only after an answer: with none the console may never have
+            // opened, and Esc out on the track opens the game's own menu.
+            Press(window, VK_ESCAPE);
+            g_step = Step::Idle;
+        } else if (since > 4.0) {
+            snprintf(g_status, sizeof g_status, "NO ANSWER FROM THE GAME - ITS CONSOLE MAY NOT BE OPEN HERE (TRY ON A TRACK)");
+            Log("setups: no answer in the game's log for \"%s\"", g_command.c_str());
+            g_step = Step::Idle;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+#else
+    (void)windowHandle;
+    (void)now;
+#endif
+}
+
+const char* Status() { return g_status; }
+bool Busy() { return g_step != Step::Idle; }
+const std::string& Current() { return g_current; }
+bool Injected(long long lParam) { return (lParam & kMarker) != 0; }
+
+}  // namespace setups
+}  // namespace mxcam
