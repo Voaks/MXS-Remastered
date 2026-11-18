@@ -306,6 +306,23 @@ bool SeenTurning(unsigned program, unsigned vao, unsigned elementBuffer, const D
     return m.matched >= 4.0 && m.turning >= 0.4 * m.matched && n >= 0.8 * m.turning;
 }
 
+bool WheelShape(unsigned program, unsigned vao, unsigned elementBuffer, const DrawCall& draw, float centre[3], float axle[3],
+                float& radius)
+{
+    if (!Enabled())
+        return false;
+    const auto found = g_meshes.find(KeyOf(program, vao, elementBuffer, draw));
+    if (found == g_meshes.end() || !found->second.wheel || found->second.shape != 2)
+        return false;
+    const Mesh& m = found->second;
+    for (int k = 0; k < 3; ++k) {
+        centre[k] = static_cast<float>(m.centre[k]);
+        axle[k] = static_cast<float>(m.axle[k]);
+    }
+    radius = static_cast<float>(m.radius);
+    return true;
+}
+
 bool KnowsWheels()
 {
     if (!Enabled())

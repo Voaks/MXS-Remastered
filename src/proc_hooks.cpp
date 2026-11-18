@@ -1996,6 +1996,8 @@ constexpr char kMudFragmentDecl[] =
     "uniform float u_mx_mud;\n"
     "uniform float u_mx_metre;\n"
     "uniform float u_mx_snow;\n"
+    "uniform highp vec4 u_mx_hub;\n"    // the wheel mesh's middle (on its axle) in its own model, its tire's radius (w; 0: not known)
+    "uniform highp vec3 u_mx_axle;\n"   // its axle (unit, its own model)
     "highp float mx_hash(highp vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }\n"
     "highp float mx_noise(highp vec3 x) {\n"
     "    highp vec3 i = floor(x); highp vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);\n"
@@ -2015,6 +2017,76 @@ constexpr char kMudFragmentApply[] =
     "\t\tfloat mx_cover = mx_rubber * smoothstep(mx_edge, mx_edge + 0.1, mx_n);\n"
     "\t\tmx_cover = max(mx_cover, (1.0 - mx_rubber) * 0.3 * u_mx_mud * smoothstep(0.5, 0.75, mx_n));\n"
     "\t\tvec3 mx_mud = mix(vec3(0.24, 0.18, 0.13), vec3(0.37, 0.29, 0.21), mx_noise(mx_q * 0.45 + 3.0));\n"
+    "\t\tvec3 mx_lit = u_ambient.rgb + u_diffuse.rgb * ndl;\n"
+    "\t\tvec3 mx_spec = vec3(0.0);\n"
+    "\t\tif (u_mx_snow <= 0.0) {\n"
+    // Mud as on a real tire (photos: dry dust, caked mud, wet clay). Where on the tire comes first:
+    //  - the knobs: lighter than the rubber around them in the tire's own texture (the area around
+    //    read 4 mip levels down), the grooves between them darker; the knobs' sides and edges where its
+    //    normal map turns away from the tire's own surface;
+    //  - with the wheel's shape known (u_mx_hub, lobby_wheels), the sidewall (facing along the axle,
+    //    from the facet's own normal in the model) and how far out from the axle (mx_rr: 1 at the tread).
+    // Then how thick the mud is there (mx_t): patchy at the size of a hand and in clumps of a few cm,
+    // packed into the grooves, thinner on the knob tops, scraped off the knob edges (dark rubber
+    // outlining the knobs). On the sidewall a dusting, heaviest by the tread, in streaks out from the axle.
+    // Where it's thick: caked mud, the tread's shape under it softened, lumpy (its own bump), darker
+    // where it's still moist (a little sheen there) and lighter where it dried; where it's thin, a
+    // pale, translucent film of dust over the rubber. A fine grain of grit over all of it, faded out
+    // where it would be smaller than a pixel.
+    "\t\t\tfloat mx_wide = dot(texture(u_tex, interp_texcoord, 4.0).rgb, vec3(0.2126, 0.7152, 0.0722));\n"
+    "\t\t\tfloat mx_lum = dot(mx_albedo.rgb, vec3(0.2126, 0.7152, 0.0722));\n"
+    "\t\t\tfloat mx_tire = 1.0 - smoothstep(0.38, 0.58, min(mx_lum, mx_wide + 0.04));\n"
+    "\t\t\tfloat mx_top = smoothstep(0.04, 0.16, mx_lum - mx_wide);\n"
+    "\t\t\tfloat mx_groove = smoothstep(0.01, 0.08, mx_wide - mx_lum);\n"
+    "\t\t\tvec3 mx_flat = normalize(interp_normal);\n"
+    "\t\t\tfloat mx_kedge = smoothstep(0.04, 0.25, 1.0 - clamp(dot(n, mx_flat), 0.0, 1.0));\n"
+    "\t\t\thighp vec3 mx_d = mx_pos - u_mx_hub.xyz;\n"
+    "\t\t\thighp vec3 mx_rad = mx_d - u_mx_axle * dot(mx_d, u_mx_axle);\n"
+    "\t\t\thighp float mx_radl = length(mx_rad);\n"
+    "\t\t\thighp vec3 mx_fn = cross(dFdx(mx_pos), dFdy(mx_pos));\n"
+    "\t\t\tfloat mx_known = u_mx_hub.w > 0.0 ? 1.0 : 0.0;\n"
+    "\t\t\tfloat mx_rr = mx_known > 0.5 ? mx_radl / u_mx_hub.w : 1.0;\n"
+    "\t\t\tfloat mx_side = mx_known * smoothstep(0.55, 0.85, abs(dot(mx_fn, u_mx_axle)) / (length(mx_fn) + 1e-20));\n"
+    "\t\t\thighp vec3 mx_dir = mx_rad / (mx_radl + 1e-6);\n"
+    "\t\t\tfloat mx_streak = mx_noise(mx_dir * 22.0 + u_mx_axle * (mx_rr * 3.0)) * 0.65 + mx_noise(mx_dir * 55.0 + u_mx_axle * (mx_rr * 7.0) + 11.0) * 0.35;\n"
+    "\t\t\tfloat mx_clump = mx_noise(mx_q * 1.7 + 3.0) * 0.55 + mx_noise(mx_q * 4.3 + 9.0) * 0.3 + mx_noise(mx_q * 11.0 + 21.0) * 0.15;\n"
+    "\t\t\tfloat mx_t = u_mx_mud * 1.15 - 0.25 + (mx_n - 0.5) * 0.75 + (mx_clump - 0.5) * 0.55 + 0.3 * mx_groove - 0.25 * mx_kedge;\n"
+    "\t\t\tfloat mx_sidet = u_mx_mud * smoothstep(0.66, 0.97, mx_rr) * (0.2 + 0.9 * mx_streak) - 0.12 + (mx_clump - 0.5) * 0.3;\n"
+    "\t\t\tmx_t = mix(mx_t, mx_sidet, mx_side);\n"
+    "\t\t\tfloat mx_thick = smoothstep(0.42, 0.62, mx_t - 0.15 * mx_top);\n"
+    "\t\t\tfloat mx_film = smoothstep(0.0, 0.42, mx_t + 0.1 * mx_top);\n"
+    "\t\t\tmx_cover = mx_tire * max(mx_thick, mx_film * 0.6);\n"
+    // (the wheel's metal: a light dusting, as before)
+    "\t\t\tmx_cover = max(mx_cover, (1.0 - mx_rubber) * 0.3 * u_mx_mud * smoothstep(0.5, 0.75, mx_n));\n"
+    "\t\t\tfloat mx_wet = clamp(smoothstep(0.45, 0.8, mx_noise(mx_q * 0.6 + 13.0)) * (0.4 + 0.6 * smoothstep(0.6, 0.9, mx_t)) * (1.0 - 0.7 * mx_top)\n"
+    "\t\t\t                     + 0.4 * mx_groove, 0.0, 1.0) * mx_thick;\n"
+    "\t\t\tvec3 mx_dust = vec3(0.62, 0.53, 0.42);\n"
+    "\t\t\tvec3 mx_cake = mix(vec3(0.53, 0.43, 0.32), vec3(0.40, 0.30, 0.20), mx_wet);\n"
+    "\t\t\tmx_mud = mix(mx_dust, mx_cake, mx_thick);\n"
+    "\t\t\tfloat mx_tone = mx_noise(mx_q * 0.45 + 3.0);\n"
+    "\t\t\tmx_mud *= 0.86 + 0.28 * mx_tone;\n"
+    "\t\t\tmx_mud += vec3(0.025, 0.0, -0.02) * (mx_noise(mx_q * 0.3 + 31.0) - 0.5);\n"
+    "\t\t\thighp vec3 mx_gq = mx_q * 26.0 + 41.0;\n"
+    "\t\t\tfloat mx_g = mx_noise(mx_gq);\n"
+    "\t\t\tfloat mx_gfade = 1.0 - smoothstep(0.3, 0.9, length(fwidth(mx_gq)));\n"
+    "\t\t\tmx_mud *= 1.0 + mx_gfade * (0.15 * smoothstep(0.72, 0.88, mx_g) - 0.12 * (1.0 - smoothstep(0.12, 0.28, mx_g)));\n"
+    "\t\t\tmx_mud *= 1.0 + 0.06 * (mx_noise(mx_q * 11.0 + 51.0) - 0.5) * (1.0 - smoothstep(0.4, 1.0, length(fwidth(mx_q * 11.0))));\n"
+    // The caked mud's own shape: lumps (mx_h, about 6 mm, in the view's units) over the tread, its
+    // knobs' normal-mapped shape softened under it; a bump from the lumps' slope across the picture
+    // (faded out where the lumps are smaller than a few pixels), shaded darker down between them.
+    "\t\t\tvec3 mx_nb = normalize(mix(n, mx_flat, mx_thick * 0.75));\n"
+    "\t\t\thighp float mx_h = (mx_clump * 0.7 + mx_n * 0.3) * mx_thick * 0.006 * u_mx_metre;\n"
+    "\t\t\thighp vec3 mx_px = dFdx(interp_viewer), mx_py = dFdy(interp_viewer);\n"
+    "\t\t\thighp vec3 mx_r1 = cross(mx_py, mx_nb), mx_r2 = cross(mx_nb, mx_px);\n"
+    "\t\t\thighp float mx_det = dot(mx_px, mx_r1);\n"
+    "\t\t\tfloat mx_bfade = 1.0 - smoothstep(0.25, 0.6, length(fwidth(mx_q * 4.3)));\n"
+    "\t\t\thighp vec3 mx_grad = sign(mx_det) * (dFdx(mx_h) * mx_r1 + dFdy(mx_h) * mx_r2) * mx_bfade;\n"
+    "\t\t\thighp vec3 mx_bumped = abs(mx_det) * mx_nb - mx_grad;\n"
+    "\t\t\tvec3 mx_nm = dot(mx_bumped, mx_bumped) > 0.0 ? normalize(mx_bumped) : mx_nb;\n"
+    "\t\t\tfloat mx_ao = mix(1.0, mix(0.75, 1.0, smoothstep(0.2, 0.8, mx_clump)) * (1.0 - 0.2 * mx_groove), mx_thick);\n"
+    "\t\t\tmx_lit = u_ambient.rgb * mx_ao + u_diffuse.rgb * max(dot(mx_nm, light), 0.0);\n"
+    "\t\t\tmx_spec = u_diffuse.rgb * (pow(max(dot(reflect(normalize(interp_viewer), mx_nm), light), 0.0), 18.0) * 0.18 * mx_wet);\n"
+    "\t\t}\n"
     "\t\tif (u_mx_snow > 0.0) {\n"
     // Snow: packed into the tread, a grey-white crust - thicker in places, thinner in others, with a
     // fine grain of its own. The tire's own shape keeps it from being one flat coat: the knobs' sides
@@ -2029,7 +2101,7 @@ constexpr char kMudFragmentApply[] =
     "\t\t\tmx_cover = mx_rubber * (0.4 + 0.42 * mx_thick) * (0.75 + 0.25 * mx_grain) * (1.0 - smoothstep(0.03, 0.2, mx_relief));\n"
     "\t\t\tmx_cover = max(mx_cover, (1.0 - mx_rubber) * 0.25 * smoothstep(0.45, 0.75, mx_n));\n"
     "\t\t}\n"
-    "\t\tcolor.rgb = mix(color.rgb, mx_mud * (u_ambient.rgb + u_diffuse.rgb * ndl), mx_cover);\n"
+    "\t\tcolor.rgb = mix(color.rgb, mx_mud * mx_lit + mx_spec, mx_cover);\n"
     "\t}\n";
 // WEATHER: the rain's wet shine, in the same shader (after the mud: mud gets wet too), on whatever it
 // draws - bikes, riders, their gear - while u_mx_wet is set (PaintWet: while it rains). Darker, cloth
@@ -3643,6 +3715,33 @@ void PaintTireDirt(const DrawCall& draw)
                         break;
                     }
                 }
+            }
+        }
+    }
+    // The wheel's shape (where the sidewall and the tread are), from the lobby's wheels: sent when it
+    // changes from the last draw of this program (a radius of 0: not known, the tread's look all over).
+    if (want > 0.0f && real_glUniform4fv && real_glUniform3fv) {
+        struct HubSent {
+            GLint hub = -2, axle = -1;
+            float sent[7] = { -1.0f, 0, 0, 0, 0, 0, 0 };
+        };
+        static std::unordered_map<GLuint, HubSent> hubs;
+        HubSent& h = hubs[g_program];
+        if (h.hub == -2) {
+            h.hub = real_glGetUniformLocation ? real_glGetUniformLocation(g_program, "u_mx_hub") : -1;
+            h.axle = real_glGetUniformLocation ? real_glGetUniformLocation(g_program, "u_mx_axle") : -1;
+        }
+        if (h.hub >= 0) {
+            float c[3] = {}, a[3] = { 1.0f, 0.0f, 0.0f }, r = 0.0f;
+            const auto element = g_elementBuffers.find(g_vao);
+            if (!lobby::WheelShape(g_program, g_vao, element != g_elementBuffers.end() ? element->second : 0, draw, c, a, r))
+                r = 0.0f;
+            const float now[7] = { c[0], c[1], c[2], r, a[0], a[1], a[2] };
+            if (std::memcmp(now, h.sent, sizeof now) != 0) {
+                real_glUniform4fv(h.hub, 1, now);
+                if (h.axle >= 0)
+                    real_glUniform3fv(h.axle, 1, now + 4);
+                std::memcpy(h.sent, now, sizeof now);
             }
         }
     }

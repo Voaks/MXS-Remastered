@@ -38,6 +38,11 @@ bool KnownNotWheel(unsigned program, unsigned vao, unsigned elementBuffer, const
 // dirt: what may have mud on it.
 bool SeenTurning(unsigned program, unsigned vao, unsigned elementBuffer, const DrawCall& draw);
 
+// A wheel mesh's shape in its own model's space, once known: the middle of its bounds (on the axle),
+// its axle (unit) and its tire's radius. For the tire dirt: where on the tire a point is.
+bool WheelShape(unsigned program, unsigned vao, unsigned elementBuffer, const DrawCall& draw, float centre[3], float axle[3],
+                float& radius);
+
 // The frame is done: rawView is the game's view for it (null if none was found).
 void FrameEnd(const double* rawView, double now);
 // (For the log: a 3D draw the wheels can't be learnt from - 1: drawn with bones, 2: its geometry streamed.)
