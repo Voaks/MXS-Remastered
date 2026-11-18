@@ -265,6 +265,10 @@ bool SaveConfig();
 bool ReadLearned(const char* key, double value[3]);
 void WriteLearned(const char* key, const double value[3]);
 void ForgetLearned(const char* key);
+// The settings menu's size (its bottom right corner dragged), against its usual size: [Other]
+// MenuSize, written as soon as a drag ends. Not part of the presets or DEFAULTS. 1 when not saved.
+double ReadMenuSize();
+void WriteMenuSize(double size);
 // Puts the camera and graphics tunables back to their defaults; keys and detection settings are untouched.
 void ResetTunables();
 

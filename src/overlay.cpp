@@ -3017,6 +3017,7 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
                 g_panel.zoom = 1.0f;  // (back at its usual size: snapped to it)
         } else {
             g_panel.resizing = false;
+            WriteMenuSize(g_panel.zoom);  // (kept for next time)
         }
     }
 
@@ -4713,6 +4714,12 @@ void OverlayFrame(HDC dc)
         return true;
     }();
     (void)testOffset;
+    // Its size dragged last time (saved when a drag ends), once.
+    static const bool sizeLoaded = [] {
+        g_panel.zoom = static_cast<float>(ReadMenuSize());
+        return true;
+    }();
+    (void)sizeLoaded;
     // (And resized to this much of its usual size.)
     static const bool testZoom = [] {
         char text[16] = "";

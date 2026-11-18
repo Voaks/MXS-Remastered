@@ -17,7 +17,8 @@ them.
 
     python make_engine_sounds.py "C:\\Games\\MX Simulator" [out_dir]
 
-The 250 four-stroke pack is made from a sound mod's recordings instead: make_250f.py.
+The 250 four-stroke, 250 two-stroke and 125 two-stroke packs are made from recordings instead:
+make_250f.py (a sound mod's), make_250.py (a real 250 two-stroke's; --engine default125 for the 125).
 
 Writes <out_dir>/MXS_REMASTERED_engine_<engine>.pack (a .saf, named so the game never loads it by itself)
 and preview_<engine>.wav: each RPM's full-throttle sound, first stock, then the pack's, to listen to.
@@ -33,10 +34,8 @@ from scipy import signal
 import saf
 
 ENGINES = {  # stock soundtable -> what it is (for the logs and previews)
-    'default125': '125 two-stroke',
-    'default250': '250 two-stroke',
     'default450f': '450 four-stroke',
-}  # (default250f: make_250f.py)
+}  # (default250f: make_250f.py; default250 and default125: make_250.py)
 CYCLES = 16          # cycles in each new patch
 SEQUENCE = 128       # how many of them the play order lists before it repeats
 SEED = 20261107      # the same packs every time it's run

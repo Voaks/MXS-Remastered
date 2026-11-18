@@ -723,6 +723,26 @@ void ForgetLearned(const char* key)
     WritePrivateProfileStringW(L"Learned", wkey, nullptr, g_path);
 }
 
+double ReadMenuSize()
+{
+    if (!g_path[0])
+        return 1.0;
+    wchar_t buffer[64] = L"";
+    GetPrivateProfileStringW(L"Other", L"MenuSize", L"", buffer, 64, g_path);
+    wchar_t* end = nullptr;
+    const double size = wcstod(buffer, &end);
+    return end != buffer && std::isfinite(size) && size > 0.1 && size < 10.0 ? size : 1.0;
+}
+
+void WriteMenuSize(double size)
+{
+    if (!g_path[0])
+        return;
+    wchar_t text[32];
+    swprintf_s(text, L"%.3f", size);
+    WritePrivateProfileStringW(L"Other", L"MenuSize", text, g_path);  // (one key: quick)
+}
+
 namespace {
 
 // Everything in the ini (or, with g_presetSection set, a preset's section), over base: what's
