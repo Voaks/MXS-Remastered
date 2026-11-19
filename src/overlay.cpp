@@ -1534,6 +1534,11 @@ const RowDef kRows[] = {
               "The cache size doesn't effect FPS, it only changes how much memory is used"),
     Slider(kTabGraphics, nullptr,           "Tire dirt",            &Config::tireDirt,         0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
         .Help("Mud caked on your tires, in clumps that turn with the wheels, lit by the sun."),
+    Slider(kTabGraphics, nullptr,           "Bike dirt",            &Config::bikeDirt,         0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
+        .Help("Mud and dust on your own bike: a dusty film and splatter at first, then caked mud on the "
+              "lower half - the engine, swingarm, fork legs, the fenders' undersides - thickest where the "
+              "wheels throw it, and at 100% most of the bike covered. Only your bike, never anyone else's. "
+              "Your tires have their own setting (Tire dirt)."),
     Slider(kTabGraphics, nullptr,           "Roost",                &Config::roost,            0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
         .Help("The dirt your rear tire throws: dark clods flying back in arcs and a sheet of dust "
               "behind you, most when you're on the gas and sliding through turns, thrown out of the "

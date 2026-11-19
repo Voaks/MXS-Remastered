@@ -40,6 +40,9 @@
 //     rivalstep the other bike alone, updated every 4th frame (network steps): its wheels are still learnt
 //     rivalroost  the same, both bikes speeding up, roost on every bike: the other bike throws roost
 //     rival     another bike and rider 1 m beside yours (nearer the camera) at your speed, your rear wheel not drawn after 1.5 s: no marks of yours on its track
+//     bikedirtall  the same with Marks & dirt on every bike (the other bike's tires muddy, its body clean)
+//     bikedirt  the same (real-sized tires), both bikes stopping mid-view, each with a light body panel drawn by the bike shader, Bike dirt
+//               at 100%: mud on your bike's panel, none on the other bike's
 //     wheeldrift  both wheels in view, learnt; the rear drawn 6 cm low after 1 s: what's learnt stays put
 //     backshadow  the bike standing still mid-view, rear wheel never drawn: the back of the bike's
 //               stand-in shapes, to look at in frame.bmp
@@ -367,9 +370,10 @@ int main(int argc, char** argv)
                                                                                 : "Shadows=1\nShadowMap=1\nShadowBatch=0");
     else if (mode == "tires" || tiresLate || mode == "tiresfeet" || mode == "tiresair" || mode == "tireshidden" || mode == "rearhidden" ||
              mode == "gatebox" || mode == "backshadow" || mode == "wheeldrift" || mode == "rival" || mode == "rivalroost" ||
-             mode == "rivalstep" || mode == "riderfar")  // your bike on spinning wheels (metres, feet, in the air, wheels not drawn)
+             mode == "rivalstep" || mode == "riderfar" || mode == "bikedirt" || mode == "bikedirtall")  // your bike on spinning wheels (metres, feet, in the air, wheels not drawn)
         // (tires: the dirt at 0.75, a player's setting: patchy mud, not a tire covered in it)
-        settings = base.replace(base.find("TireMarks=0\nTireDirt=0"), 22, mode == "tires" ? "TireMarks=1\nTireDirt=0.75" : tiresLate ? "TireMarks=1\nTireDirt=0" : "TireMarks=1\nTireDirt=1");
+        settings = base.replace(base.find("TireMarks=0\nTireDirt=0"), 22, mode == "tires" ? "TireMarks=1\nTireDirt=0.75" : tiresLate ? "TireMarks=1\nTireDirt=0"
+                                                                         : mode == "bikedirt" ? "TireMarks=1\nTireDirt=1\nBikeDirt=1" : mode == "bikedirtall" ? "TireMarks=1\nTireDirt=1\nBikeDirt=1\nMarksEveryBike=1" : "TireMarks=1\nTireDirt=1");
     else if (mode == "roost")  // your bike speeding up: roost (and its marks and dirt)
         settings = base.replace(base.find("TireMarks=0\nTireDirt=0"), 22, "TireMarks=1\nTireDirt=1\nRoost=1\nRoostDust=1");
     else if (mode == "waterspray")  // the same in the rain, the roost off: only the water the rear tire throws
@@ -402,8 +406,8 @@ int main(int argc, char** argv)
         settings += "[Learned]\nRearWheelOnBike=4.200,-1.950,-6.730\n";
     }
     if (mode == "rearhidden" || mode == "gatebox" || mode == "backshadow" || mode == "wheeldrift" || mode == "rival" || mode == "rivalroost" ||
-        mode == "rivalstep" || mode == "riderfar") {  // first person from the start: the wheels learnt in an earlier session
-        if (mode != "rival" && mode != "rivalroost" && mode != "rivalstep")  // (rival: no shadows, they'd darken the other bike's track like ruts)
+        mode == "rivalstep" || mode == "riderfar" || mode == "bikedirt" || mode == "bikedirtall") {  // first person from the start: the wheels learnt in an earlier session
+        if (mode != "rival" && mode != "rivalroost" && mode != "rivalstep" && mode != "bikedirt" && mode != "bikedirtall")  // (rival: no shadows, they'd darken the other bike's track like ruts)
             settings = settings.replace(settings.find("Shadows=0"), 9, "Shadows=1\nShadowMap=1");
         settings += "[Learned]\nRearWheelOnBike=0.000,6.102,-0.820\nFrontWheelOnBike=0.000,6.102,-5.676\n"
                     "BikeRider=0.000,7.874,-2.789\n";  // where your rider sits on the test bike
@@ -592,8 +596,8 @@ int main(int argc, char** argv)
     const GLint oColor = gl.GetUniformLocation(object, "u_color");
 
     // Meshes: the unit patch (indices in a buffer, like the game's) and a 1 m cube, and a quad.
-    GLuint arrays[10] = {};
-    gl.GenVertexArrays(10, arrays);
+    GLuint arrays[12] = {};
+    gl.GenVertexArrays(12, arrays);
     const auto mesh = [&](GLuint array, const float* vertices, size_t vertexBytes, int components,
                           const unsigned short* indices, size_t indexBytes, GLuint* made = nullptr) {
         GLuint local[2] = {};
@@ -671,6 +675,16 @@ int main(int argc, char** argv)
     // like the wheel's (origin 1.5 m off the axle).
     const float discQuad[12] = { 0.08f, 1.38f, -0.12f,  0.08f, 1.62f, -0.12f,  0.08f, 1.38f, 0.12f,  0.08f, 1.62f, 0.12f };
     mesh(arrays[6], discQuad, sizeof discQuad, 3, patchIndices, sizeof patchIndices);
+    // A body panel (bikedirt), in the bike model's own space (feet): standing along the bike 15 cm to its
+    // side, over the back half of the wheelbase, from 5 cm under the axles to 25 cm over them.
+    const float panelQuad[12] = { 0.15f * ft, 1.81f * ft, -0.1f * ft,  0.15f * ft, 1.81f * ft, -1.0f * ft,
+                                  0.15f * ft, 2.11f * ft, -0.1f * ft,  0.15f * ft, 2.11f * ft, -1.0f * ft };
+    mesh(arrays[10], panelQuad, sizeof panelQuad, 3, patchIndices, sizeof patchIndices);
+    // (bikedirt: a part of another bike, of another model - a mesh never on yours: a square 30 cm each
+    // way, standing along the bike, its middle at its model's origin.)
+    const float otherQuad[12] = { 0, -0.15f * ft, 0.15f * ft,  0, -0.15f * ft, -0.15f * ft,
+                                  0, 0.15f * ft, 0.15f * ft,   0, 0.15f * ft, -0.15f * ft };
+    mesh(arrays[11], otherQuad, sizeof otherQuad, 3, patchIndices, sizeof patchIndices);
     gl.BindVertexArray(0);
 
     // A texture the game would filter smoothly (for texture filtering), bound on unit 2 as
@@ -833,7 +847,8 @@ int main(int argc, char** argv)
     // rivalstep: the other bike alone (your wheels never drawn), its place and its wheels' turn updated
     // only every 4th frame, the way another rider's come in network steps: its wheels must still be learnt.
     const bool rivalStep = mode == "rivalstep";
-    const bool rival = mode == "rival" || rivalRoost || rivalStep;
+    const bool bikeDirtTest = mode == "bikedirt" || mode == "bikedirtall";  // (all: Marks & dirt on every bike on too)  // rival, both bikes stopping mid-view: mud on your bike's body only
+    const bool rival = mode == "rival" || rivalRoost || rivalStep || bikeDirtTest;
     const bool snowRoll = mode == "snowroll";
     const bool waterSpray = mode == "waterspray";
     const bool roostRun = mode == "roost" || snowRoll || waterSpray;
@@ -854,6 +869,8 @@ int main(int argc, char** argv)
     QueryPerformanceCounter(&runStart);
     double timedMs = 0;
     int timedFrames = 0;
+    float lastX0 = 0.0f;  // (bikedirt: where your bike stood at the end)
+    bool sawIntruder = false;  // (bikedirt: another bike's part against yours was drawn)
     for (int frameIndex = 0; frameIndex < frames; ++frameIndex) {
         if (roostRun) {  // the last frame 1.3 s in: your bike still in view, its roost trailing behind it
             LARGE_INTEGER count;
@@ -951,7 +968,7 @@ int main(int argc, char** argv)
             QueryPerformanceCounter(&nowCount);
             const float elapsed = static_cast<float>(double(nowCount.QuadPart - runStart.QuadPart) / double(frequency.QuadPart));
             const bool wheelsDrawn = !hiddenWheels || elapsed < 1.4f;
-            const float travelled = roostRun ? 0.6f * elapsed + 3.0f * elapsed * elapsed : hiddenWheels ? 5.0f * elapsed : gateBox ? 0.0f : backShadow ? 4.5f : rivalRoost ? 1.0f * elapsed + 1.2f * elapsed * elapsed : rearHidden || wheelDrift || rival ? 3.0f * elapsed : frameIndex * 0.45f;
+            const float travelled = roostRun ? 0.6f * elapsed + 3.0f * elapsed * elapsed : hiddenWheels ? 5.0f * elapsed : gateBox ? 0.0f : backShadow ? 4.5f : rivalRoost ? 1.0f * elapsed + 1.2f * elapsed * elapsed : bikeDirtTest ? (elapsed < 1.7333f ? 3.0f * elapsed : 5.2f) : rearHidden || wheelDrift || rival ? 3.0f * elapsed : frameIndex * 0.45f;
             // First, like a real track: lots of other skinned objects drawn further away (more than
             // the mod used to keep track of in a frame).
             for (int k = 0; k < 100; ++k) {
@@ -962,6 +979,7 @@ int main(int argc, char** argv)
                 Skinned(placed, 0, none, none, none);
             }
             const float x0 = ((roostRun ? -6.5f : -5.5f) + travelled) * u;
+            lastX0 = x0;
             const float facingX[9] = { 0, 0, 1,  0, 1, 0,  -1, 0, 0 };  // its -Z along world +X
             // rearhidden: your rider moves about on the bike (as riding), and wears a helmet: a rigid
             // draw of the rider's program on its torso bone, drawn for the first 1.4 s only (in first
@@ -1106,8 +1124,31 @@ int main(int argc, char** argv)
                 Mul(bikeModel, onBike, wheelModel);
                 Mul(view, wheelModel, viewModel);
                 gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
-                gl.BindVertexArray(arrays[u > 1.5f ? 5 : 4]);
+                gl.BindVertexArray(arrays[bikeDirtTest ? 8 : u > 1.5f ? 5 : 4]);
                 p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+            }
+            if (bikeDirtTest) {  // your bike's body panel, over the front half of its wheelbase
+                UseBike(steelTex);
+                const float forward[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, -0.9f * u, 1 };
+                float panelModel[16];
+                Mul(bikeModel, forward, panelModel);
+                Mul(view, panelModel, viewModel);
+                gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
+                gl.BindVertexArray(arrays[10]);
+                p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                // Once both bikes have stopped: a part of another bike (of another model: a mesh never
+                // on yours) stood against yours, inside your bike's box - 30 cm to its side, 35 to 65 cm
+                // over its axles, over the front half (above your panel). Never dirt on it.
+                if (elapsed > 1.9f) {
+                    const float place[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0.3f * u, 2.36f * u, -1.45f * u, 1 };
+                    float intruder[16];
+                    Mul(bikeModel, place, intruder);
+                    Mul(view, intruder, viewModel);
+                    gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
+                    gl.BindVertexArray(arrays[11]);
+                    p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                    sawIntruder = true;
+                }
             }
             gl.UseProgram(object);
             if (rival) {  // the other bike: 1 m nearer the camera than yours (its rider the nearest to the
@@ -1133,7 +1174,14 @@ int main(int argc, char** argv)
                     Mul(rivalModel, onBike, wheelModel);
                     Mul(view, wheelModel, viewModel);
                     gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
-                    gl.BindVertexArray(arrays[rivalStep || rivalRoost ? 8 : 5]);
+                    gl.BindVertexArray(arrays[rivalStep || rivalRoost || bikeDirtTest ? 8 : 5]);
+                    p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                }
+                if (bikeDirtTest) {  // its body panel, over the back half of its wheelbase (beside, not in front of, yours on screen)
+                    UseBike(steelTex);
+                    Mul(view, rivalModel, viewModel);
+                    gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
+                    gl.BindVertexArray(arrays[10]);
                     p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
                 }
                 gl.UseProgram(object);
@@ -2200,6 +2248,129 @@ int main(int argc, char** argv)
             fclose(in);
         }
         Check(log.find("is a wheel") != std::string::npos, "another bike's wheels updated in steps (as over the network) are learnt");
+    } else if (bikeDirtTest) {
+        std::string log;
+        FILE* in = _wfsopen((dir + L"MXS_REMASTERED.log").c_str(), L"rb", _SH_DENYNO);
+        if (in) {
+            char buffer[4096];
+            size_t got;
+            while ((got = fread(buffer, 1, sizeof buffer, in)) > 0)
+                log.append(buffer, got);
+            fclose(in);
+        }
+        for (const char* topic : { "bike dirt:", "found your bike", "carries the tire dirt" })
+            for (size_t from = 0; (from = log.find(topic, from)) != std::string::npos;) {
+                const size_t end = log.find('\n', from);
+                printf("    log: %s\n", log.substr(from, end == std::string::npos ? std::string::npos : end - from).c_str());
+                from = end;
+            }
+        // Each panel's middle on screen (yours over the front half of its wheelbase; the other bike's,
+        // 1 m nearer, over the back half of its): the average colour round it.
+        const float u = 3.2808f;
+        const auto Average = [&](float x, float y, float z, double out[3]) {
+            const float world[4] = { x, y, z, 1 };
+            float eye[4] = {}, clip[4] = {};
+            for (int r = 0; r < 4; ++r)
+                for (int j = 0; j < 4; ++j)
+                    eye[r] += view[j * 4 + r] * world[j];
+            for (int r = 0; r < 4; ++r)
+                for (int j = 0; j < 4; ++j)
+                    clip[r] += projection[j * 4 + r] * eye[j];
+            const int px = static_cast<int>((clip[0] / clip[3] * 0.5f + 0.5f) * W);
+            const int py = H - 1 - static_cast<int>((clip[1] / clip[3] * 0.5f + 0.5f) * H);
+            int n = 0;
+            out[0] = out[1] = out[2] = 0;
+            for (int dy = -6; dy <= 6; ++dy)
+                for (int dx = -10; dx <= 10; ++dx) {
+                    const int qx = px + dx, qy = py + dy;
+                    if (qx < 0 || qx >= W || qy < 0 || qy >= H)
+                        continue;
+                    const Pixel c = At(qx, qy);
+                    out[0] += c.r;
+                    out[1] += c.g;
+                    out[2] += c.b;
+                    ++n;
+                }
+            for (int k = 0; k < 3; ++k)
+                out[k] /= n > 0 ? n : 1;
+            printf("    at pixel (%d, %d)\n", px, py);
+        };
+        double mine[3], theirs[3];
+        Average(lastX0 + 1.45f * u, 0.46f * u, -4.35f * u, mine);
+        Average(lastX0 + 0.55f * u, 0.46f * u, -3.35f * u, theirs);
+        printf("    your bike's panel: %.0f %.0f %.0f; the other bike's: %.0f %.0f %.0f\n", mine[0], mine[1], mine[2], theirs[0], theirs[1],
+               theirs[2]);
+        Check(log.find("bike dirt: on a part of your bike") != std::string::npos, "the log says the bike dirt went on a part of your bike");
+        Check(mine[0] - mine[2] > 15.0 && mine[0] < 190.0, "your bike's light grey panel has mud on it (browner and darker)");
+        Check(std::fabs(theirs[0] - theirs[2]) < 8.0 && theirs[0] > 180.0, "the other bike's panel, 1 m beside yours, has none");
+        // Another bike's part (of another model) stood against yours, inside your bike's box, once
+        // yours is learnt: its side towards the camera.
+        double intruder[3];
+        Average(lastX0 + 1.45f * u, 0.86f * u, -4.2f * u, intruder);
+        printf("    another bike's part against yours: %.0f %.0f %.0f\n", intruder[0], intruder[1], intruder[2]);
+        // (Learnt only from your bike as found, over 4 m: lost early - MXCAM_TEST_LOSE_BIKE under frame
+        // 100 - it never is, and until it is, what's in your bike's box has the dirt.)
+        const char* lose = getenv("MXCAM_TEST_LOSE_BIKE");
+        if (!lose || atoi(lose) >= 100) {
+            Check(log.find("bike dirt: learnt a part of your bike") != std::string::npos, "riding, your bike's own parts are learnt");
+            Check(sawIntruder, "another bike's part was drawn against yours");
+            Check(std::fabs(intruder[0] - intruder[2]) < 8.0 && intruder[0] > 150.0,
+                  "another bike's part stood against yours (in your bike's box) has no dirt");
+        }
+        // The other bike's front tire (its axle 1.73 m ahead of its origin, clear of its panel): your
+        // wheels' mud, found at your axles, never on it. (Yours aren't drawn by the end.) The mud is a
+        // ring round the tread (the hub's clean): three places on it right of the middle, where the
+        // tire square, turned, reaches 62 pixels out and the hub 40 (above it's sky, below ground).
+        double theirTire[3] = {};
+        {
+            const float world[4] = { lastX0 + 1.73f * u, 0.36f * u, -3.5f * u, 1 };
+            float eye[4] = {}, clip[4] = {};
+            for (int r = 0; r < 4; ++r)
+                for (int j = 0; j < 4; ++j)
+                    eye[r] += view[j * 4 + r] * world[j];
+            for (int r = 0; r < 4; ++r)
+                for (int j = 0; j < 4; ++j)
+                    clip[r] += projection[j * 4 + r] * eye[j];
+            const int px = static_cast<int>((clip[0] / clip[3] * 0.5f + 0.5f) * W);
+            const int py = H - 1 - static_cast<int>((clip[1] / clip[3] * 0.5f + 0.5f) * H);
+            const int spots[3][2] = { { 48, 0 }, { 52, -6 }, { 52, 6 } };
+            int n = 0;
+            for (const auto& spot : spots)
+                for (int dy = -2; dy <= 2; ++dy)
+                    for (int dx = -2; dx <= 2; ++dx) {
+                        const int qx = px + spot[0] + dx, qy = py + spot[1] + dy;
+                        if (qx < 0 || qx >= W || qy < 0 || qy >= H)
+                            continue;
+                        const Pixel c = At(qx, qy);
+                        theirTire[0] += c.r;
+                        theirTire[1] += c.g;
+                        theirTire[2] += c.b;
+                        ++n;
+                    }
+            for (double& c : theirTire)
+                c /= n > 0 ? n : 1;
+        }
+        printf("    the other bike's front tire, round its tread: %.0f %.0f %.0f\n", theirTire[0], theirTire[1], theirTire[2]);
+        if (mode == "bikedirtall")  // (every bike's tires on: theirs too - never their bike's body)
+            Check(theirTire[0] - theirTire[2] > 10.0, "with every bike's tire dirt on, the other bike's tire has mud");
+        else
+            Check(theirTire[0] - theirTire[2] < 10.0, "the other bike's tire, 1 m beside yours, has no mud");
+        if (mode != "bikedirtall")  // (every bike's: yours are muddied as one of every bike's first)
+            Check(log.find("tire dirt: mud on a wheel at your rear axle") != std::string::npos &&
+                      log.find("tire dirt: mud on a wheel at your front axle") != std::string::npos,
+                  "your tires get their mud from where they sit on your bike too (not only from the wheel tracker)");
+        // (Run with MXCAM_TEST_LOSE_BIKE=<frame>: your bike not found from then on - the dirt stays,
+        // following its biggest part.)
+        if (getenv("MXCAM_TEST_LOSE_BIKE")) {
+            Check(log.find("following its biggest part") != std::string::npos, "with your bike lost, the dirt is held, following its biggest part");
+            Check(log.find("no dirt till it is") == std::string::npos, "and never lets go of it");
+        }
+        // (MXCAM_TEST_WHEELS_UNSEEN: your wheels never known to turn - their mud from their shape, at once.)
+        if (getenv("MXCAM_TEST_WHEELS_UNSEEN") && mode == "bikedirtall")
+            Check(log.find("a wheel of a bike's, from its shape") != std::string::npos,
+                  "every bike's tires get their mud from their shape (a pair a wheelbase apart) before they're seen turning");
+        else if (getenv("MXCAM_TEST_WHEELS_UNSEEN"))
+            Check(log.find("by its shape, not seen turning yet") != std::string::npos, "your tires get their mud from their shape before they're seen turning");
     } else if (rival) {
         std::string log;
         FILE* in = _wfsopen((dir + L"MXS_REMASTERED.log").c_str(), L"rb", _SH_DENYNO);

@@ -1404,7 +1404,11 @@ BikeModel g_bikeModel;
 bool      g_thirdPerson = false;          // the camera is away from your rider (with some hysteresis)
 
 // Your bike this frame (world transform), however it was found.
-struct BikeNow { bool found = false; int how = 0; double model[16] = {}; };
+struct BikeNow {
+    bool found = false; int how = 0; double model[16] = {};
+    double inRaw[16] = {};  // the same in the game's camera space that frame (raw view * model), for the body dirt
+    double at = -1e9;       // when it was last found (Seconds)
+};
 // For the trace (F11): which of this frame's objects FindBike took (-1: none), how (0 followed, 1
 // searched), how far your rider was from where it sits on it (m), and the headlight's placement.
 struct BikeTrace { int object = -1, pass = -1, objects = 0; double carry = -1; int headlightMode = -1; Vec3 headlight; bool lit = false; };
@@ -2134,6 +2138,10 @@ void UpdateBike(double dt)
     } else if (FindBike(g_bikeNow.model)) {
         g_bikeNow.found = true;
         g_bikeNow.how = 1;
+    }
+    if (g_bikeNow.found) {
+        MatMul(g_frame.raw, g_bikeNow.model, g_bikeNow.inRaw);
+        g_bikeNow.at = Seconds();
     }
 }
 
@@ -8546,6 +8554,39 @@ bool OwnRiderForLook(double inEye[3])
     inEye[0] = g_rider.inEye.x;
     inEye[1] = g_rider.inEye.y;
     inEye[2] = g_rider.inEye.z;
+    return true;
+}
+
+bool GetOwnBikeFrame(OwnBikeFrame& out)
+{
+    out = OwnBikeFrame{};
+    // (As last found, at the end of the last frame drawn: not after a pause or a menu in between.)
+    if (!g_bikeNow.found || Seconds() - g_bikeNow.at > 0.25)
+        return false;
+    std::copy(g_bikeNow.inRaw, g_bikeNow.inRaw + 16, out.inRaw);
+    const BikeModel& b = g_bikeModel;
+    out.up[0] = b.up.x;
+    out.up[1] = b.up.y;
+    out.up[2] = b.up.z;
+    out.forward[0] = b.forward.x;
+    out.forward[1] = b.forward.y;
+    out.forward[2] = b.forward.z;
+    out.unitsPerMetre = g_unitsPerMetre;
+    // Its axles: where they were learnt on it, else MX Simulator's usual place (a stock bike's, in feet
+    // or metres: the rear 0.75 m behind the middle, the front 0.74 m ahead, 0.2 m under it).
+    const double u = g_unitsPerMetre;
+    for (int i = 0; i < 2; ++i) {
+        const Wheel& w = g_wheels[i];
+        double* axle = i ? out.frontAxle : out.rearAxle;
+        Vec3 at = b.forward * ((i ? 0.74 : -0.75) * u) - b.up * ((i ? 0.24 : 0.18) * u);
+        if (w.onBikeWeight >= kWheelOnBikeMin && WheelPlausibleOnBike(i, w.onBike)) {
+            at = w.onBike;
+            out.learnt[i] = true;
+        }
+        axle[0] = at.x;
+        axle[1] = at.y;
+        axle[2] = at.z;
+    }
     return true;
 }
 

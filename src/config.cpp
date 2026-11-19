@@ -379,6 +379,7 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Graphics",  L"HeadlightColor",       static_cast<double>(c.headlightColor) },
         { L"Graphics",  L"UltraGraphics",        c.ultraGraphics ? 1.0 : 0.0 },
         { L"Graphics",  L"TireDirt",             c.tireDirt },
+        { L"Graphics",  L"BikeDirt",             c.bikeDirt },
         { L"Graphics",  L"Roost",                c.roost },
         { L"Graphics",  L"RoostDust",            c.roostDust },
         { L"Graphics",  L"RoostEveryBike",       c.roostEveryBike ? 1.0 : 0.0 },
@@ -613,6 +614,7 @@ void CopyTunables(const Config& from, Config& to)
     to.snowSound            = from.snowSound;
     to.snowTires            = from.snowTires;
     to.tireDirt             = from.tireDirt;
+    to.bikeDirt             = from.bikeDirt;
     to.roost                = from.roost;
     to.roostDust            = from.roostDust;
     to.roostEveryBike       = from.roostEveryBike;
@@ -928,6 +930,7 @@ Config ParseConfig(const Config& base)
     c.snowSound        = Clamp(ReadDouble(L"Weather", L"SnowSound", c.snowSound), 0.0, 1.0);
     c.snowTires        = Clamp(ReadDouble(L"Weather", L"SnowTires", c.snowTires), 0.0, 1.0);
     c.tireDirt         = ReadDouble(L"Graphics", L"TireDirt", c.tireDirt);
+    c.bikeDirt         = ReadDouble(L"Graphics", L"BikeDirt", c.bikeDirt);
     c.roost            = Clamp(ReadDouble(L"Graphics", L"Roost", c.roost), 0.0, 1.0);
     c.roostDust        = Clamp(ReadDouble(L"Graphics", L"RoostDust", c.roostDust), 0.0, 1.0);
     c.roostEveryBike   = ReadInt(L"Graphics", L"RoostEveryBike", c.roostEveryBike) != 0;
@@ -1031,6 +1034,7 @@ Config ParseConfig(const Config& base)
     c.markCacheSegs        = Clamp(std::round(c.markCacheSegs), 10000.0, 1000000.0);
     c.markDepth            = Clamp(c.markDepth, 0.0, 1.0);
     c.tireDirt             = Clamp(c.tireDirt, 0.0, 1.0);
+    c.bikeDirt             = Clamp(c.bikeDirt, 0.0, 1.0);
     c.motionBlur           = Clamp(c.motionBlur, 0.0, 1.0);
     c.depthOfField         = Clamp(c.depthOfField, 0.0, 1.0);
     c.dofFocus             = Clamp(c.dofFocus, 0.0, 500.0);

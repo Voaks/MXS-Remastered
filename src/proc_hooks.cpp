@@ -2001,6 +2001,10 @@ constexpr char kMudFragmentDecl[] =
     "uniform float u_mx_snow;\n"
     "uniform highp vec4 u_mx_hub;\n"    // the wheel mesh's middle (on its axle) in its own model, its tire's radius (w; 0: not known)
     "uniform highp vec3 u_mx_axle;\n"   // its axle (unit, its own model)
+    "uniform float u_mx_body;\n"        // the body dirt on a part of your bike (0: off; see PaintBikeDirt)
+    "uniform highp mat4 u_mx_tobike;\n" // the part's model -> your bike, metres (x across, y up from the axles, z forward from between them)
+    "uniform mat3 u_mx_bikeview;\n"     // directions in the view -> your bike
+    "uniform vec4 u_mx_bodyp;\n"        // half the wheelbase (m), how wet (0..1), snow (0/1), -
     "highp float mx_hash(highp vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }\n"
     "highp float mx_noise(highp vec3 x) {\n"
     "    highp vec3 i = floor(x); highp vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);\n"
@@ -2008,7 +2012,100 @@ constexpr char kMudFragmentDecl[] =
     "                   mix(mx_hash(i + vec3(0.0, 1.0, 0.0)), mx_hash(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),\n"
     "               mix(mix(mx_hash(i + vec3(0.0, 0.0, 1.0)), mx_hash(i + vec3(1.0, 0.0, 1.0)), f.x),\n"
     "                   mix(mx_hash(i + vec3(0.0, 1.0, 1.0)), mx_hash(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);\n"
+    "}\n"
+    // A drop of mud in some cells of a grid (one in each, with the chance dens): its middle in the middle
+    // half of the cell, its radius at most a quarter of it (never past its cell's walls); w: a cell's
+    // share of a pixel there (soft edges; faded out under a pixel).
+    "float mx_dot(highp vec3 p, float dens, float w) {\n"
+    "    highp vec3 c = floor(p);\n"
+    "    float h = mx_hash(c + 0.37);\n"
+    "    highp vec3 f = fract(p) - (0.25 + 0.5 * vec3(mx_hash(c + 1.7), mx_hash(c + 4.3), mx_hash(c + 9.1)));\n"
+    "    float r = 0.07 + 0.18 * fract(h * 7.31);\n"
+    "    float e = max(0.06, 0.7 * w);\n"
+    "    return h < dens ? (1.0 - smoothstep(r - e, r + e, length(f))) * (1.0 - smoothstep(0.3, 0.7, w)) : 0.0;\n"
     "}\n";
+// BIKE DIRT: mud and dust on your bike's body (photos of muddy bikes: a film of dust over all of it;
+// flecks and splatter flung off the wheels; caked mud low down and where the tires throw it - under
+// the fenders, the swingarm, the engine, the fork legs, the frame behind the front wheel). Where it
+// reaches comes from the place on your bike (mx_b) and which way the surface faces there (mx_bn):
+// low, near a wheel (behind the front one, ahead of and over the rear), facing down; less on top. How
+// thick it is there, in patches and lumps on the part's own model (the mud stays on it as the fork
+// and swingarm move): a film (see-through), a smear, caked (its own lumpy bump, darker and a little
+// shiny where it's still moist, lighter where it dried), with flecks over it. In the snow, slush.
+constexpr char kBodyFragmentApply[] =
+    "\tif (u_mx_body > 0.0) {\n"
+    "\t\thighp vec3 mx_b = (u_mx_tobike * vec4(mx_pos, 1.0)).xyz;\n"
+    "\t\tvec3 mx_bn = normalize(u_mx_bikeview * normalize(interp_normal));\n"
+    "\t\thighp vec3 mx_q = mx_pos * (1.0 / u_mx_metre);\n"
+    "\t\tfloat mx_hw = u_mx_bodyp.x;\n"
+    "\t\tfloat mx_low = 1.0 - smoothstep(-0.05, 0.8, mx_b.y);\n"
+    "\t\tfloat mx_df = length(vec2(mx_b.y, mx_b.z - mx_hw));\n"
+    "\t\tfloat mx_dr = length(vec2(mx_b.y, mx_b.z + mx_hw));\n"
+    "\t\tfloat mx_sprf = (1.0 - smoothstep(0.36, 0.95, mx_df)) * (mx_b.z < mx_hw ? 1.0 : 0.55);\n"
+    "\t\tfloat mx_sprr = (1.0 - smoothstep(0.36, 0.85, mx_dr)) * (mx_b.z > -mx_hw ? 1.0 : 0.6);\n"
+    "\t\tfloat mx_inner = 1.0 - smoothstep(0.08, 0.3, abs(mx_b.x));\n"
+    "\t\tfloat mx_under = smoothstep(0.1, 0.7, -mx_bn.y);\n"
+    "\t\tfloat mx_up = smoothstep(0.35, 0.9, mx_bn.y);\n"
+    "\t\tfloat mx_ahead = smoothstep(0.3, 0.9, mx_bn.z);\n"
+    "\t\tfloat mx_reach = clamp(0.55 * mx_low + 0.55 * max(mx_sprf, mx_sprr) + 0.15 * mx_inner * mx_low, 0.0, 1.0);\n"
+    "\t\tmx_reach = clamp(mx_reach * (1.0 + 0.45 * mx_under + 0.15 * mx_ahead - 0.3 * mx_up), 0.0, 1.0);\n"
+    "\t\tfloat mx_patch = mx_noise(mx_q * 4.0 + 5.0) * 0.6 + mx_noise(mx_q * 9.0 + 17.0) * 0.4;\n"
+    "\t\tfloat mx_clump = mx_noise(mx_q * 22.0 + 3.0) * 0.55 + mx_noise(mx_q * 51.0 + 9.0) * 0.3 + mx_noise(mx_q * 120.0 + 21.0) * 0.15;\n"
+    "\t\tfloat mx_streak = mx_noise(mx_q * vec3(14.0, 1.6, 14.0) + 61.0);\n"
+    "\t\tfloat mx_t = u_mx_body * 1.3 * (0.25 + mx_reach) + 0.4 * u_mx_body * u_mx_body * u_mx_body - 0.48 + (mx_patch - 0.5) * 0.8 +\n"
+    "\t\t             (mx_clump - 0.5) * 0.35;\n"
+    "\t\tfloat mx_thick = smoothstep(0.42, 0.6, mx_t);\n"
+    "\t\tfloat mx_smear = smoothstep(0.16, 0.42, mx_t) * (1.0 - mx_thick);\n"
+    "\t\tfloat mx_film = clamp(u_mx_body * (0.55 + 0.7 * mx_reach + 0.25 * mx_up) * (0.6 + 0.8 * mx_streak), 0.0, 1.0);\n"
+    // (flecks: round drops of mud in three sizes, a little drawn out along the bike - flung back off the
+    // wheels - many near the wheels and low down, few up top; each size faded out once it's under a pixel)
+    "\t\thighp vec3 mx_sq = mx_q * vec3(1.0, 1.0, 0.65);\n"
+    "\t\tfloat mx_dens = clamp(u_mx_body * (0.15 + 1.1 * mx_reach) - 0.08, 0.0, 0.9);\n"
+    "\t\tfloat mx_fw = length(fwidth(mx_sq));\n"
+    "\t\tfloat mx_fleck = max(max(mx_dot(mx_sq * 45.0, mx_dens, 45.0 * mx_fw), mx_dot(mx_sq * 75.0 + 13.0, mx_dens, 75.0 * mx_fw)),\n"
+    "\t\t                     mx_dot(mx_sq * 120.0 + 29.0, mx_dens * 1.2, 120.0 * mx_fw));\n"
+    "\t\tmx_fleck *= 1.0 - mx_thick;\n"
+    "\t\tfloat mx_wet = clamp(smoothstep(0.45, 0.8, mx_noise(mx_q * 3.0 + 13.0)) * (0.3 + 0.7 * smoothstep(0.6, 0.9, mx_t)) + u_mx_bodyp.y, 0.0, 1.0);\n"
+    "\t\tvec3 mx_dust = vec3(0.60, 0.52, 0.41);\n"
+    "\t\tvec3 mx_cake = mix(vec3(0.53, 0.43, 0.32), vec3(0.38, 0.29, 0.20), mx_wet * mx_thick);\n"
+    "\t\tvec3 mx_spat = mix(vec3(0.50, 0.40, 0.29), vec3(0.34, 0.26, 0.18), max(mx_wet * 0.6, u_mx_bodyp.y));\n"
+    "\t\tif (u_mx_bodyp.z > 0.5) {\n"
+    "\t\t\tmx_dust = vec3(0.72, 0.73, 0.76);\n"
+    "\t\t\tmx_cake = vec3(0.62, 0.64, 0.68);\n"
+    "\t\t\tmx_spat = vec3(0.56, 0.57, 0.60);\n"
+    "\t\t\tmx_wet *= 0.3;\n"
+    "\t\t}\n"
+    // (the cake lighter at its edges, where it dried first)
+    "\t\tmx_cake = mix(mx_cake * 1.12, mx_cake, smoothstep(0.42, 0.56, mx_t));\n"
+    "\t\tvec3 mx_col = mx_dust;\n"
+    "\t\tfloat mx_cov = mx_film * 0.62;\n"
+    "\t\tmx_col = mix(mx_col, mix(mx_dust, mx_cake, 0.55), mx_smear);\n"
+    "\t\tmx_cov = max(mx_cov, 0.8 * mx_smear);\n"
+    "\t\tmx_col = mix(mx_col, mx_cake, mx_thick);\n"
+    "\t\tmx_cov = max(mx_cov, mx_thick);\n"
+    "\t\tmx_col = mix(mx_col, mx_spat, mx_fleck);\n"
+    "\t\tmx_cov = max(mx_cov, 0.95 * mx_fleck);\n"
+    "\t\tmx_col *= 0.9 + 0.2 * mx_noise(mx_q * 2.0 + 71.0);\n"
+    "\t\thighp vec3 mx_gq = mx_q * 340.0 + 41.0;\n"
+    "\t\tfloat mx_g = mx_noise(mx_gq);\n"
+    "\t\tfloat mx_gfade = (1.0 - smoothstep(0.3, 0.9, length(fwidth(mx_gq)))) * max(mx_thick, mx_smear);\n"
+    "\t\tmx_col *= 1.0 + mx_gfade * (0.15 * smoothstep(0.72, 0.88, mx_g) - 0.12 * (1.0 - smoothstep(0.12, 0.28, mx_g)));\n"
+    // (caked: lumps of about 5 mm over the part's own shape, softened under it, and darker down between them)
+    "\t\tvec3 mx_flat = normalize(interp_normal);\n"
+    "\t\tvec3 mx_nb = normalize(mix(n, mx_flat, mx_thick * 0.8));\n"
+    "\t\thighp float mx_h = (mx_clump * 0.7 + mx_patch * 0.3) * mx_thick * 0.005 * u_mx_metre;\n"
+    "\t\thighp vec3 mx_px = dFdx(interp_viewer), mx_py = dFdy(interp_viewer);\n"
+    "\t\thighp vec3 mx_r1 = cross(mx_py, mx_nb), mx_r2 = cross(mx_nb, mx_px);\n"
+    "\t\thighp float mx_det = dot(mx_px, mx_r1);\n"
+    "\t\tfloat mx_bfade = 1.0 - smoothstep(0.25, 0.6, length(fwidth(mx_q * 51.0)));\n"
+    "\t\thighp vec3 mx_grad = sign(mx_det) * (dFdx(mx_h) * mx_r1 + dFdy(mx_h) * mx_r2) * mx_bfade;\n"
+    "\t\thighp vec3 mx_bumped = abs(mx_det) * mx_nb - mx_grad;\n"
+    "\t\tvec3 mx_nm = dot(mx_bumped, mx_bumped) > 0.0 ? normalize(mx_bumped) : mx_nb;\n"
+    "\t\tfloat mx_ao = mix(1.0, mix(0.72, 1.0, smoothstep(0.2, 0.8, mx_clump)), mx_thick);\n"
+    "\t\tvec3 mx_lit = u_ambient.rgb * mx_ao + u_diffuse.rgb * max(dot(mx_nm, light), 0.0);\n"
+    "\t\tvec3 mx_spec = u_diffuse.rgb * (pow(max(dot(reflect(normalize(interp_viewer), mx_nm), light), 0.0), 18.0) * 0.2 * mx_wet * mx_thick);\n"
+    "\t\tcolor.rgb = mix(color.rgb, mx_col * mx_lit + mx_spec, mx_cov);\n"
+    "\t}\n";
 // (The game's colours are not linear: mud in its terms.)
 constexpr char kMudFragmentApply[] =
     "\tif (u_mx_mud > 0.0) {\n"
@@ -2181,7 +2278,7 @@ std::string MudShader(GLuint shader, const std::string& source)
         changed.insert(at + strlen("interp_texcoord = vattr_texcoord;"), "\n\tmx_pos = vattr_position;");
     } else {
         changed.insert(changed.find("out vec4 f_fragcolor;") + strlen("out vec4 f_fragcolor;") + 1, kMudFragmentDecl);
-        changed.insert(changed.find("\tz = gl_FragCoord.z / gl_FragCoord.w;"), kMudFragmentApply);
+        changed.insert(changed.find("\tz = gl_FragCoord.z / gl_FragCoord.w;"), std::string(kBodyFragmentApply) + kMudFragmentApply);
     }
     using PFN_GetShaderiv = void(APIENTRY*)(GLuint, GLenum, GLint*);
     static const auto get = reinterpret_cast<PFN_GetShaderiv>(GetRealGLFunction("glGetShaderiv"));
@@ -2204,7 +2301,7 @@ std::string MudShader(GLuint shader, const std::string& source)
         if (wetOk) {
             if (!g_loggedMudShader[1]) {
                 g_loggedMudShader[1] = true;
-                Log("tire dirt: the bike's fragment shader carries the tire dirt (drawn on your tires themselves)");
+                Log("tire dirt: the bike's fragment shader carries the tire dirt and the bike dirt (drawn on your tires and bike themselves)");
             }
             return wet;
         }
@@ -2214,7 +2311,8 @@ std::string MudShader(GLuint shader, const std::string& source)
     if (!logged) {
         logged = true;
         Log("tire dirt: the bike's %s shader %s", vertex ? "vertex" : "fragment",
-            ok ? "carries the tire dirt (drawn on your tires themselves)" : "didn't compile changed: left as it was, no tire dirt");
+            ok ? "carries the tire dirt and the bike dirt (drawn on your tires and bike themselves)"
+               : "didn't compile changed: left as it was, no tire dirt or bike dirt");
     }
     return ok ? changed : std::string();
 }
@@ -2915,22 +3013,19 @@ bool MeasureDraw(const DrawCall& draw, DrawBounds& b)
 // overhead (see DrawBounds): it isn't cast.
 const DrawBounds* g_castBox = nullptr;  // the draw TooBigToCast just measured (null: none), for ShadowMatrices
 
-bool TooBigToCast(const DrawCall& draw, const GLfloat uploaded[16])
+// The current draw's bounds (DrawBounds), measured once per draw call and kept while its buffers'
+// contents are the same. Null for geometry the game rewrites while running (dust, streamed pieces):
+// reading it back every time it changes stalls the frame.
+DrawBounds* CachedBounds(const DrawCall& draw)
 {
-    g_castBox = nullptr;
-    const SkinnedProgram* skin = FindSkinned(g_program);
-    if (skin && skin->bones != 0)
-        return false;  // (a rider: its bones place it)
     const auto element = g_elementBuffers.find(g_vao);
-    // Geometry the game rewrites while running (dust, streamed pieces) isn't measured: reading it
-    // back every time it changes stalls the frame. It casts as before.
     if (element != g_elementBuffers.end() && element->second && Streamed(element->second))
-        return false;
+        return nullptr;
     const auto arrays = g_vaoArrayBuffers.find(g_vao);
     if (arrays != g_vaoArrayBuffers.end())
         for (GLuint buffer : arrays->second)
             if (Streamed(buffer))
-                return false;
+                return nullptr;
     unsigned long long key = 1469598103934665603ull;
     const auto Mix = [&key](unsigned long long v) { key ^= v + 0x9E3779B97F4A7C15ull + (key << 6) + (key >> 2); };
     Mix(g_program);
@@ -2957,6 +3052,20 @@ bool TooBigToCast(const DrawCall& draw, const GLfloat uploaded[16])
             measured.buffers[0] = ~0u;  // (tried: not measurable, not tried again)
         b = measured;
     }
+    return &b;
+}
+
+bool TooBigToCast(const DrawCall& draw, const GLfloat uploaded[16])
+{
+    g_castBox = nullptr;
+    const SkinnedProgram* skin = FindSkinned(g_program);
+    if (skin && skin->bones != 0)
+        return false;  // (a rider: its bones place it)
+    // (Geometry the game rewrites while running isn't measured: it casts as before.)
+    DrawBounds* cached = CachedBounds(draw);
+    if (!cached)
+        return false;
+    DrawBounds& b = *cached;
     if (!b.valid)
         return false;
     g_castBox = &b;
@@ -3676,8 +3785,15 @@ bool   g_havePaintAxle[2] = { false, false };
 std::unordered_map<GLuint, GLint> g_mudUniform;   // program -> u_mx_mud (-1: none)
 std::unordered_map<GLuint, float> g_mudSet;       // program -> what it holds
 
-// Right before each draw: u_mx_mud on for your wheels' draws, off for everything else.
-void PaintTireDirt(const DrawCall& draw)
+bool OwnBikePlaced();                  // (bike dirt, below: placed, its axles learnt)
+bool AtOwnAxle(const DrawCall& draw);
+bool PairedWheel(const DrawCall& draw);
+bool TestWheelsUnseen();
+bool RoundBounds(const DrawCall& draw, float centre[3], float axle[3], float& radius);
+
+// Right before each draw: u_mx_mud on for your wheels' draws, off for everything else. True when it
+// went on (the draw is one of a wheel's: no bike dirt on it).
+bool PaintTireDirt(const DrawCall& draw)
 {
     auto at = g_mudUniform.find(g_program);
     if (at == g_mudUniform.end()) {
@@ -3686,7 +3802,7 @@ void PaintTireDirt(const DrawCall& draw)
         g_mudSet[g_program] = 0.0f;
     }
     if (at->second < 0 || !real_glUniform1f)
-        return;
+        return false;
     const Config& cfg = GetConfig();
     float want = 0.0f;
     double raw[16];
@@ -3695,13 +3811,25 @@ void PaintTireDirt(const DrawCall& draw)
     // wheel (lobby_wheels.h), whoever's bike, whatever its model. The mud is worked out in the tire's
     // own model and its own texture's rubber, so nothing else about the wheel is needed.
     const double coat = TireCoat(cfg);  // (the mud, or in the snow, packed snow)
+    // A wheel not seen turning yet (a bike standing at the gate, just joined): one of a pair of
+    // wheel-shaped meshes a wheelbase apart (PairedWheel), at once.
     if (cfg.shaders && coat > 0.0 && cfg.marksEveryBike) {
         const auto element = g_elementBuffers.find(g_vao);
-        if (lobby::IsWheel(g_program, g_vao, element != g_elementBuffers.end() ? element->second : 0, draw))
+        if ((!TestWheelsUnseen() && lobby::IsWheel(g_program, g_vao, element != g_elementBuffers.end() ? element->second : 0, draw)) ||
+            PairedWheel(draw))
             want = static_cast<float>(coat);
     }
-    if (want == 0.0f && cfg.shaders && coat > 0.0 && !g_paintParts.empty() && postfx::FrameRawView(raw) && mv != g_programModelview.end() &&
-        mv->second.frame == g_frameNumber) {
+    // Your own tires: with your bike placed (CurrentBodyFrame), whatever the lobby's wheels know as a
+    // wheel sitting on one of its axles. The wheel tracker's list (the tire marks') only while it isn't:
+    // the tracker lets go of a wheel it took for someone else's and is a while finding it again (your
+    // front tire came out clean), and while it holds someone else's wheel, the mud went on theirs.
+    // (Tests: MXCAM_TEST_NO_PAINT_PARTS - as if the wheel tracker had lost both your wheels.)
+    static const bool noPaintParts = GetEnvironmentVariableA("MXCAM_TEST_NO_PAINT_PARTS", nullptr, 0) > 0;
+    const bool placed = want == 0.0f && cfg.shaders && coat > 0.0 && OwnBikePlaced();
+    if (placed && AtOwnAxle(draw))
+        want = static_cast<float>(coat);
+    if (want == 0.0f && !placed && !noPaintParts && cfg.shaders && coat > 0.0 && !g_paintParts.empty() && postfx::FrameRawView(raw) &&
+        mv != g_programModelview.end() && mv->second.frame == g_frameNumber) {
         const DeferredCaster id = MakeCaster(draw, -1, -1);
         double invRaw[16];
         if (InverseAffine(raw, invRaw)) {
@@ -3752,6 +3880,9 @@ void PaintTireDirt(const DrawCall& draw)
             }
         }
     }
+    // (The axles at MX Simulator's usual place until they're learnt: on top of the tracker's list.)
+    if (want == 0.0f && !placed && cfg.shaders && coat > 0.0 && AtOwnAxle(draw))
+        want = static_cast<float>(coat);
     // The wheel's shape (where the sidewall and the tread are), from the lobby's wheels: sent when it
     // changes from the last draw of this program (a radius of 0: not known, the tread's look all over).
     if (want > 0.0f && real_glUniform4fv && real_glUniform3fv) {
@@ -3768,8 +3899,13 @@ void PaintTireDirt(const DrawCall& draw)
         if (h.hub >= 0) {
             float c[3] = {}, a[3] = { 1.0f, 0.0f, 0.0f }, r = 0.0f;
             const auto element = g_elementBuffers.find(g_vao);
-            if (!lobby::WheelShape(g_program, g_vao, element != g_elementBuffers.end() ? element->second : 0, draw, c, a, r))
-                r = 0.0f;
+            const GLuint elements = element != g_elementBuffers.end() ? element->second : 0;
+            if (!lobby::WheelShape(g_program, g_vao, elements, draw, c, a, r)) {
+                // (A wheel of yours not turned yet, given its mud by its shape: from its bounds.)
+                const bool unknown = !lobby::IsWheel(g_program, g_vao, elements, draw) && !lobby::SeenTurning(g_program, g_vao, elements, draw);
+                if (!unknown || !RoundBounds(draw, c, a, r))
+                    r = 0.0f;
+            }
             const float now[7] = { c[0], c[1], c[2], r, a[0], a[1], a[2] };
             if (std::memcmp(now, h.sent, sizeof now) != 0) {
                 real_glUniform4fv(h.hub, 1, now);
@@ -3795,6 +3931,721 @@ void PaintTireDirt(const DrawCall& draw)
                 real_glUniform1f(snowAt, snow);
         }
         set = key;
+    }
+    return want > 0.0f;
+}
+
+// ---- Bike dirt: mud and dust on your own bike's body (kBodyFragmentApply) --------------------------
+// Set per draw, in the same bike shader as the tire dirt, while one of your own bike's parts is drawn:
+// a rigid draw (no bones: not a rider's body), not a wheel, whose mesh's middle sits on your bike -
+// from 45 cm behind the rear axle to 45 cm ahead of the front one, within 42 cm of its centreline,
+// from 40 cm under the axles to 85 cm over them (your helmet sits higher, about 1.1 m over them) -
+// placed from where your bike was in the game camera's own view at the end of the last frame (the
+// camera rides with you: from one frame to the next your bike barely moves in its view). Never another
+// bike's: on the start gate the next bike's parts sit a metre aside, and nothing else is looked at.
+struct BodyFrame {
+    unsigned frame = ~0u;
+    bool     have = false;
+    bool     fresh = false;         // placed from postfx's bike this frame (else held: see BodyAnchor)
+    bool     placed = false;
+    unsigned placedFrame = 0;       // the last frame it was placed (from postfx's bike, or its anchor)
+    double   fromRaw[16] = {};      // the game camera's space -> your bike's (metres: x across, y up from
+    double   halfWheelbase = 0.74;  // the axles' line, z forward from between them)
+    double   unitsPerMetre = 3.2808;
+    bool     axlesLearnt = false;   // both axles where they were learnt on your bike (not the usual place)
+    int      parts = 0;             // parts given the dirt this frame (for the log)
+    bool     haveWorld = false;
+    double   world[3] = {};         // your bike's middle in the world as placed at the frame's start (game units)
+    double   moved = 0.0;           // metres it moved since the last frame (0 after a jump of over 2 m)
+};
+BodyFrame g_bodyFrame;
+
+// When postfx loses your bike for a few frames (in third person it's the object under your rider:
+// stood up, leant off it, crashing, it isn't), the dirt went with it. Its biggest part (the frame and
+// engine, drawn in both views) is kept with where it sits on your bike: while your bike isn't found,
+// that part, drawn again where it was a frame ago in the camera's view, places your bike from itself.
+struct BodyCall {
+    GLuint   program = 0, vao = 0, elements = 0;
+    DrawCall draw{};
+};
+bool SameBodyCall(const BodyCall& a, const BodyCall& b)
+{
+    return a.program == b.program && a.vao == b.vao && a.elements == b.elements && a.draw.kind == b.draw.kind &&
+           a.draw.mode == b.draw.mode && a.draw.count == b.draw.count && a.draw.type == b.draw.type &&
+           a.draw.indices == b.draw.indices && a.draw.first == b.draw.first && a.draw.start == b.draw.start &&
+           a.draw.end == b.draw.end;
+}
+BodyCall MakeBodyCall(const DrawCall& draw)
+{
+    BodyCall c;
+    c.program = g_program;
+    c.vao = g_vao;
+    const auto element = g_elementBuffers.find(g_vao);
+    c.elements = element != g_elementBuffers.end() ? element->second : 0;
+    c.draw = draw;
+    return c;
+}
+struct BodyAnchor {
+    bool     have = false;
+    bool     haveWorld = false;
+    double   world[3] = {};     // its model's origin in the world, as last seen on your bike (game units)
+    BodyCall call;
+    unsigned seen = 0;          // the last frame it was drawn as a part of your bike
+    double   toBike[16] = {};   // its model -> your bike
+};
+BodyAnchor g_bodyAnchor;
+constexpr unsigned kBodyHoldFrames = 45;  // held without being placed at all, at most (then off)
+
+struct BodyStats {
+    unsigned frames = 0, fresh = 0, followed = 0, lost = 0, bare = 0;
+};
+BodyStats g_bodyStats;
+
+// Your bike as postfx found it (at the end of the last frame): false if it wasn't.
+bool PlaceFromOwnBike(double fromRaw[16], double& halfWheelbase, double& unitsPerMetre, bool& axlesLearnt)
+{
+    postfx::OwnBikeFrame own;
+    double bikeFromRaw[16];
+    if (!postfx::GetOwnBikeFrame(own) || !InverseAffine(own.inRaw, bikeFromRaw))
+        return false;
+    const double u = own.unitsPerMetre > 0.0 ? own.unitsPerMetre : 3.2808;
+    double o[3], x[3], y[3], z[3];
+    for (int k = 0; k < 3; ++k) {
+        o[k] = 0.5 * (own.rearAxle[k] + own.frontAxle[k]);
+        z[k] = own.frontAxle[k] - own.rearAxle[k];
+    }
+    const double length = std::sqrt(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]);
+    if (length < 0.8 * u || length > 2.2 * u)
+        return false;
+    for (double& c : z)
+        c /= length;
+    const double along = own.up[0] * z[0] + own.up[1] * z[1] + own.up[2] * z[2];
+    for (int k = 0; k < 3; ++k)
+        y[k] = own.up[k] - z[k] * along;
+    const double ly = std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]);
+    if (ly < 0.5)
+        return false;
+    for (double& c : y)
+        c /= ly;
+    x[0] = y[1] * z[2] - y[2] * z[1];
+    x[1] = y[2] * z[0] - y[0] * z[2];
+    x[2] = y[0] * z[1] - y[1] * z[0];
+    double fromBike[16] = {};
+    for (int c = 0; c < 3; ++c) {
+        fromBike[c * 4 + 0] = x[c] / u;
+        fromBike[c * 4 + 1] = y[c] / u;
+        fromBike[c * 4 + 2] = z[c] / u;
+    }
+    fromBike[12] = -(x[0] * o[0] + x[1] * o[1] + x[2] * o[2]) / u;
+    fromBike[13] = -(y[0] * o[0] + y[1] * o[1] + y[2] * o[2]) / u;
+    fromBike[14] = -(z[0] * o[0] + z[1] * o[1] + z[2] * o[2]) / u;
+    fromBike[15] = 1.0;
+    Mul4(fromBike, bikeFromRaw, fromRaw);
+    halfWheelbase = 0.5 * length / u;
+    unitsPerMetre = u;
+    axlesLearnt = own.learnt[0] && own.learnt[1];
+    return true;
+}
+
+// The squared distance (game units) between your bike's middle as two placements put it in the view.
+double BikeMiddleApart(const double fromRawA[16], const double fromRawB[16])
+{
+    double a[16], b[16];
+    if (!InverseAffine(fromRawA, a) || !InverseAffine(fromRawB, b))
+        return 0.0;
+    const double dx = a[12] - b[12], dy = a[13] - b[13], dz = a[14] - b[14];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+BodyFrame& CurrentBodyFrame()
+{
+    BodyFrame& f = g_bodyFrame;
+    if (f.frame == g_frameNumber)
+        return f;
+    // (The last frame's, for the log.)
+    if (f.frame != ~0u) {
+        BodyStats& st = g_bodyStats;
+        ++st.frames;
+        if (!f.have)
+            ++st.lost;
+        else if (!f.fresh)
+            ++st.followed;
+        else
+            ++st.fresh;
+        if (f.have && f.parts == 0)
+            ++st.bare;
+        if (st.frames >= 1200) {
+            if (st.followed || st.lost || st.bare)
+                Log("bike dirt: over %u frames: your bike found %u, held from its biggest part %u, lost %u; "
+                    "frames with your bike placed but no part of it given the dirt %u",
+                    st.frames, st.fresh, st.followed, st.lost, st.bare);
+            st = BodyStats{};
+        }
+    }
+    f.frame = g_frameNumber;
+    f.parts = 0;
+    double fromRaw[16], hw = 0.74, u = 3.2808;
+    bool learnt = false;
+    // (Tests: MXCAM_TEST_LOSE_BIKE - your bike not found from this frame on.)
+    static const unsigned loseFrom = [] {
+        char text[32];
+        return GetEnvironmentVariableA("MXCAM_TEST_LOSE_BIKE", text, sizeof text) > 0 ? static_cast<unsigned>(atoi(text)) : ~0u;
+    }();
+    bool found = g_frameNumber < loseFrom && PlaceFromOwnBike(fromRaw, hw, u, learnt);
+    // Your bike found over a metre from where it was placed a frame ago (in the camera's view - both
+    // as the last frame left them): another bike taken for yours (in third person it's the one under
+    // your rider: stood beside your bike, next to someone else's, it was theirs, and the dirt went on
+    // it). Not taken while its biggest part still places it where it was (FollowBodyAnchor keeps it
+    // placed); taken once that's lost too (a respawn).
+    if (found && f.placed && g_frameNumber - f.placedFrame <= 2) {
+        const double jump = std::sqrt(BikeMiddleApart(fromRaw, f.fromRaw)) / u;
+        if (jump > 1.0) {
+            static int told = 0;
+            if (told < 10) {
+                ++told;
+                Log("bike dirt: your bike found %.2f m from where it was a frame ago: held where it was, following its biggest part", jump);
+            }
+            found = false;
+        }
+    }
+    if (found) {
+        std::copy(fromRaw, fromRaw + 16, f.fromRaw);
+        f.halfWheelbase = hw;
+        f.unitsPerMetre = u;
+        f.axlesLearnt = learnt;
+        f.fresh = true;
+        f.placed = true;
+        f.placedFrame = g_frameNumber;
+        f.have = true;
+    } else {
+        // Held where it was (in the camera's view, which rides with you), moved on by its anchor.
+        const bool was = f.have;
+        if (f.unitsPerMetre <= 0.0)
+            f.unitsPerMetre = u;
+        const bool wasFresh = f.fresh;
+        f.fresh = false;
+        f.have = f.placed && g_frameNumber - f.placedFrame <= kBodyHoldFrames;
+        static int told = 0;
+        if (told < 10 && (wasFresh || (was && !f.have))) {
+            ++told;
+            if (f.have)
+                Log("bike dirt: your bike isn't found: held where it was%s", g_bodyAnchor.have ? ", following its biggest part" : "");
+            else
+                Log("bike dirt: your bike not found for %u frames: no dirt till it is", kBodyHoldFrames);
+        }
+    }
+    // Where it is in the world, and how far it moved (for OwnPartsKnown: your bike's own parts are the
+    // ones that keep their place on it as it travels).
+    f.moved = 0.0;
+    double toRaw[16], view[16], inv[16];
+    if (f.have && InverseAffine(f.fromRaw, toRaw) && postfx::FrameRawView(view) && InverseAffine(view, inv)) {
+        double w[3];
+        for (int r = 0; r < 3; ++r)
+            w[r] = inv[r] * toRaw[12] + inv[4 + r] * toRaw[13] + inv[8 + r] * toRaw[14] + inv[12 + r];
+        if (f.haveWorld) {
+            const double dx = w[0] - f.world[0], dy = w[1] - f.world[1], dz = w[2] - f.world[2];
+            const double d = std::sqrt(dx * dx + dy * dy + dz * dz) / f.unitsPerMetre;
+            f.moved = d < 2.0 ? d : 0.0;
+        }
+        std::copy(w, w + 3, f.world);
+        f.haveWorld = true;
+    } else {
+        f.haveWorld = false;
+    }
+    return f;
+}
+
+// Where a draw's model origin is in the world (game units), from this frame's camera.
+bool OriginInWorld(const ProgramModelview& mv, double out[3])
+{
+    double view[16], inv[16];
+    if (!postfx::FrameRawView(view) || !InverseAffine(view, inv))
+        return false;
+    const double p[3] = { mv.raw[12], mv.raw[13], mv.raw[14] };
+    for (int r = 0; r < 3; ++r)
+        out[r] = inv[r] * p[0] + inv[4 + r] * p[1] + inv[8 + r] * p[2] + inv[12 + r];
+    return true;
+}
+
+// While your bike isn't found (in third person: your rider not on it - crashed, stood off it): its
+// anchor part drawn now places your bike from itself, if it's within a metre of where it was last seen
+// in the world (another bike's same part is metres away), or within half a metre of where it sat on your
+// bike as held in the camera's view. (Only the camera's view, it was lost in a crash: the camera swings
+// round, and the part was never where it was held. Only the world, it would be lost each time the game
+// moves the world's origin.)
+void FollowBodyAnchor(const DrawCall& draw, const ProgramModelview& mv, BodyFrame& f)
+{
+    BodyAnchor& a = g_bodyAnchor;
+    if (!a.have || f.fresh || !f.have || f.placedFrame == g_frameNumber || !SameBodyCall(a.call, MakeBodyCall(draw)))
+        return;
+    double raw[16], inv[16], now[16];
+    for (int k = 0; k < 16; ++k)
+        raw[k] = mv.raw[k];
+    if (!InverseAffine(raw, inv))
+        return;
+    double world[3];
+    const bool haveWorld = OriginInWorld(mv, world);
+    double worldMove = 1e9;
+    if (haveWorld && a.haveWorld) {
+        const double wx = world[0] - a.world[0], wy = world[1] - a.world[1], wz = world[2] - a.world[2];
+        worldMove = std::sqrt(wx * wx + wy * wy + wz * wz) / f.unitsPerMetre;
+    }
+    Mul4(f.fromRaw, raw, now);
+    const double dx = now[12] - a.toBike[12], dy = now[13] - a.toBike[13], dz = now[14] - a.toBike[14];
+    // (Tests: MXCAM_TEST_FOLLOW_WORLD - only the world's check, as if the camera had swung away.)
+    static const bool worldOnly = GetEnvironmentVariableA("MXCAM_TEST_FOLLOW_WORLD", nullptr, 0) > 0;
+    const double viewMove = worldOnly ? 1e9 : std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (worldMove > 1.0 && viewMove > 0.5) {
+        static int told = 0;
+        if (told < 10) {
+            ++told;
+            Log("bike dirt: its biggest part drawn %.2f m from where it was in the world, %.2f m from where it was held "
+                "in view: not taken for yours", worldMove, viewMove);
+        }
+        return;
+    }
+    Mul4(a.toBike, inv, f.fromRaw);
+    f.placedFrame = g_frameNumber;
+    a.seen = g_frameNumber;
+    if (haveWorld) {
+        std::copy(world, world + 3, a.world);
+        a.haveWorld = true;
+    }
+}
+
+// A part given the dirt while your bike was found: the anchor is the biggest one drawn lately.
+void LearnBodyAnchor(const DrawCall& draw, const ProgramModelview& mv, const double toBike[16])
+{
+    BodyAnchor& a = g_bodyAnchor;
+    const BodyCall c = MakeBodyCall(draw);
+    const bool same = a.have && SameBodyCall(a.call, c);
+    const bool stale = !a.have || g_frameNumber - a.seen > 60;
+    if (!same && !stale && draw.count <= a.call.draw.count)
+        return;
+    a.have = true;
+    a.call = c;
+    a.seen = g_frameNumber;
+    std::copy(toBike, toBike + 16, a.toBike);
+    a.haveWorld = OriginInWorld(mv, a.world);
+}
+
+// Whether the draw about to be made is a part of your bike's body; toBike: its model -> your bike.
+bool OwnBikePart(const DrawCall& draw, const ProgramModelview& mv, const BodyFrame& f, double toBike[16], double where[3])
+{
+    const SkinnedProgram* skin = FindSkinned(g_program);
+    // (Only rigid draws: bikes' parts, not a rider's body. The program carries the body dirt, so it's
+    // the game's model shader.)
+    if ((skin && skin->bones != 0) || !StaticDraw(draw))
+        return false;
+    double raw[16];
+    for (int k = 0; k < 16; ++k)
+        raw[k] = mv.raw[k];
+    Mul4(f.fromRaw, raw, toBike);
+    // (Everything else drawn with this shader - the scenery, other bikes - is left out before its mesh
+    // is looked at: its model's origin isn't within 6 m of your bike. A bike part's model origin can
+    // sit metres from the part.)
+    if (toBike[12] * toBike[12] + toBike[13] * toBike[13] + toBike[14] * toBike[14] > 6.0 * 6.0)
+        return false;
+    const auto element = g_elementBuffers.find(g_vao);
+    const GLuint elements = element != g_elementBuffers.end() ? element->second : 0;
+    if (lobby::IsWheel(g_program, g_vao, elements, draw) || lobby::SeenTurning(g_program, g_vao, elements, draw))
+        return false;  // (a wheel, or a part that turns like one: the tire dirt's)
+    const DrawBounds* b = CachedBounds(draw);
+    if (!b || !b->valid)
+        return false;
+    double mid[3], size[3];
+    for (int k = 0; k < 3; ++k) {
+        mid[k] = 0.5 * (static_cast<double>(b->lo[k]) + b->hi[k]);
+        size[k] = static_cast<double>(b->hi[k]) - b->lo[k];
+    }
+    double at[3], extent[3];
+    for (int r = 0; r < 3; ++r) {
+        at[r] = toBike[r] * mid[0] + toBike[4 + r] * mid[1] + toBike[8 + r] * mid[2] + toBike[12 + r];
+        where[r] = at[r];
+    }
+    // Its size in metres: each of its own axes' length on your bike.
+    for (int c = 0; c < 3; ++c) {
+        const double scale = std::sqrt(toBike[c * 4] * toBike[c * 4] + toBike[c * 4 + 1] * toBike[c * 4 + 1] + toBike[c * 4 + 2] * toBike[c * 4 + 2]);
+        extent[c] = size[c] * scale;
+    }
+    const double hw = f.halfWheelbase;
+    if (std::fabs(at[0]) > 0.42 || at[1] < -0.4 || at[1] > 0.85 || at[2] < -hw - 0.45 || at[2] > hw + 0.45)
+        return false;
+    const double biggest = std::max(extent[0], std::max(extent[1], extent[2]));
+    if (biggest > 2.6)
+        return false;  // (bigger than a bike: the start gate, a banner)
+    // A wheel the lobby's wheels haven't seen turn yet (standing still since you joined): wheel sized,
+    // round (two of its sides alike, the third thin) and on one of your axles.
+    double sides[3] = { extent[0], extent[1], extent[2] };
+    std::sort(sides, sides + 3);
+    const bool round = sides[2] > 0.45 && sides[2] < 0.95 && sides[1] > 0.85 * sides[2] && sides[0] < 0.45 * sides[2];
+    for (int i = 0; i < 2 && round; ++i) {
+        const double dz = at[2] - (i ? hw : -hw);
+        if (std::fabs(at[0]) < 0.15 && std::sqrt(at[1] * at[1] + dz * dz) < 0.15)
+            return false;
+    }
+    // Your helmet (learnt riding on your torso, in third person) never.
+    for (const RiddenPart& p : g_riddenParts)
+        if (p.used && p.anchor == 1 && SameDrawCall(p.caster, MakeCaster(draw, -1, -1)))
+            return false;
+    return true;
+}
+
+bool OwnBikePlaced()
+{
+    const BodyFrame& f = CurrentBodyFrame();
+    return f.have && f.axlesLearnt;
+}
+
+// A mesh shaped like a wheel, from its bounds (its own model's space): two sides alike, the third
+// thin. Its middle, the thin side's axis and half the long side.
+bool RoundBounds(const DrawCall& draw, float centre[3], float axle[3], float& radius)
+{
+    const DrawBounds* b = CachedBounds(draw);
+    if (!b || !b->valid)
+        return false;
+    float size[3];
+    for (int k = 0; k < 3; ++k) {
+        centre[k] = 0.5f * (b->lo[k] + b->hi[k]);
+        size[k] = b->hi[k] - b->lo[k];
+        axle[k] = 0.0f;
+    }
+    int thin = 0;
+    for (int k = 1; k < 3; ++k)
+        if (size[k] < size[thin])
+            thin = k;
+    const float a = size[(thin + 1) % 3], c = size[(thin + 2) % 3];
+    const float big = std::max(a, c), other = std::min(a, c);
+    if (big <= 0.0f || other < 0.85f * big || size[thin] > 0.45f * big)
+        return false;
+    axle[thin] = 1.0f;
+    radius = 0.5f * big;
+    return true;
+}
+
+// (Tests: MXCAM_TEST_WHEELS_UNSEEN - as if no wheel had been seen turning yet.)
+bool TestWheelsUnseen()
+{
+    static const bool unseen = GetEnvironmentVariableA("MXCAM_TEST_WHEELS_UNSEEN", nullptr, 0) > 0;
+    return unseen;
+}
+
+// Every bike's tires (Config::marksEveryBike), before the lobby's wheels have seen them turn: a rigid
+// mesh shaped like a wheel (RoundBounds), 45 to 95 cm across, standing up (its axle level), with another
+// like it a wheelbase away - 1 to 1.9 m along, both on parallel axles, within 20 cm of each other along
+// them, the two no more than a quarter apart in size. A bike's two wheels; never a tire barrier lying
+// down or a stack of them, nothing round on its own. Looked for among this frame's draws so far and the
+// last frame's (the other wheel is often drawn after). In the game camera's view, metres.
+struct RoundSeen {
+    double centre[3], axle[3], across;
+};
+std::vector<RoundSeen> g_roundNow, g_roundLast;
+unsigned g_roundFrame = ~0u;
+
+bool PairedWheel(const DrawCall& draw)
+{
+    if (g_roundFrame != g_frameNumber) {
+        if (g_roundFrame + 1 == g_frameNumber)
+            g_roundLast.swap(g_roundNow);
+        else
+            g_roundLast.clear();
+        g_roundNow.clear();
+        g_roundFrame = g_frameNumber;
+    }
+    const SkinnedProgram* skin = FindSkinned(g_program);
+    if ((skin && skin->bones != 0) || !StaticDraw(draw))
+        return false;
+    const auto mv = g_programModelview.find(g_program);
+    if (mv == g_programModelview.end() || mv->second.frame != g_frameNumber || mv->second.kind != ModelviewKind::Scene ||
+        mv->second.transposed)
+        return false;
+    float mid[3], axle[3], radius = 0.0f;
+    if (!RoundBounds(draw, mid, axle, radius))
+        return false;
+    double view[16];
+    if (!postfx::FrameRawView(view))
+        return false;
+    const double u = CurrentBodyFrame().unitsPerMetre;
+    const auto& m = mv->second.raw;
+    RoundSeen r;
+    for (int k = 0; k < 3; ++k) {
+        r.centre[k] = (m[k] * mid[0] + m[4 + k] * mid[1] + m[8 + k] * mid[2] + m[12 + k]) / u;
+        r.axle[k] = m[k] * axle[0] + m[4 + k] * axle[1] + m[8 + k] * axle[2];
+    }
+    const double scale = std::sqrt(r.axle[0] * r.axle[0] + r.axle[1] * r.axle[1] + r.axle[2] * r.axle[2]);
+    if (scale <= 0.0)
+        return false;
+    for (double& c : r.axle)
+        c /= scale;
+    r.across = 2.0 * radius * scale / u;
+    if (r.across < 0.45 || r.across > 0.95)
+        return false;
+    // Standing up: its axle level (the world's up in the view: the game camera's second column).
+    double up[3] = { view[4], view[5], view[6] };
+    const double lu = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+    if (lu <= 0.0)
+        return false;
+    if (std::fabs(r.axle[0] * up[0] + r.axle[1] * up[1] + r.axle[2] * up[2]) / lu > 0.35)
+        return false;
+    bool paired = false;
+    double apart = 0.0;
+    for (const std::vector<RoundSeen>* list : { &g_roundNow, &g_roundLast }) {
+        for (const RoundSeen& o : *list) {
+            if (std::fabs(o.axle[0] * r.axle[0] + o.axle[1] * r.axle[1] + o.axle[2] * r.axle[2]) < 0.95)
+                continue;
+            if (o.across < 0.75 * r.across || o.across > r.across / 0.75)
+                continue;
+            const double d[3] = { o.centre[0] - r.centre[0], o.centre[1] - r.centre[1], o.centre[2] - r.centre[2] };
+            const double along = d[0] * r.axle[0] + d[1] * r.axle[1] + d[2] * r.axle[2];
+            const double all = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            const double between = std::sqrt(std::max(0.0, all * all - along * along));
+            if (std::fabs(along) <= 0.2 && between >= 1.0 && between <= 1.9) {
+                paired = true;
+                apart = between;
+                break;
+            }
+        }
+        if (paired)
+            break;
+    }
+    g_roundNow.push_back(r);
+    if (paired) {
+        static int told = 0;
+        if (told < 10) {
+            ++told;
+            Log("postfx: tire dirt: a wheel of a bike's, from its shape (%d indices, %.2f m across, its other wheel %.2f m away), "
+                "before it's seen turning", draw.count, r.across, apart);
+        }
+    }
+    return paired;
+}
+
+// Whether the draw about to be made is a wheel on one of your bike's axles, its middle within 25 cm
+// across, 40 cm up or down (the suspension) and 35 cm along of where the axle sits on your bike
+// (another bike's is a metre or more aside, even at the gate): a mesh the lobby's wheels know as a wheel
+// (or seen turning like one) - or, so the mud is there at once, before your wheels have turned (just
+// joined, standing still), one shaped like a wheel, 45 to 95 cm across.
+bool AtOwnAxle(const DrawCall& draw)
+{
+    const auto element = g_elementBuffers.find(g_vao);
+    const GLuint elements = element != g_elementBuffers.end() ? element->second : 0;
+    const bool known = !TestWheelsUnseen() && (lobby::IsWheel(g_program, g_vao, elements, draw) || lobby::SeenTurning(g_program, g_vao, elements, draw));
+    if (!known) {
+        const SkinnedProgram* skin = FindSkinned(g_program);
+        if ((skin && skin->bones != 0) || !StaticDraw(draw))
+            return false;  // (a rider's body)
+    }
+    const auto mv = g_programModelview.find(g_program);
+    if (mv == g_programModelview.end() || mv->second.frame != g_frameNumber || mv->second.kind != ModelviewKind::Scene ||
+        mv->second.transposed)
+        return false;
+    const BodyFrame& f = CurrentBodyFrame();
+    if (!f.have)
+        return false;
+    float mid[3], axle[3], radius = 0.0f;
+    double raw[16], toBike[16], at[3];
+    for (int k = 0; k < 16; ++k)
+        raw[k] = mv->second.raw[k];
+    Mul4(f.fromRaw, raw, toBike);
+    if (!known) {
+        if (!RoundBounds(draw, mid, axle, radius))
+            return false;
+        // Its size on your bike (metres): the long side's model axis scaled.
+        const int side = axle[0] > 0.5f ? 1 : 0;
+        const double scale = std::sqrt(toBike[side * 4] * toBike[side * 4] + toBike[side * 4 + 1] * toBike[side * 4 + 1] +
+                                       toBike[side * 4 + 2] * toBike[side * 4 + 2]);
+        const double across = 2.0 * radius * scale;
+        if (across < 0.45 || across > 0.95)
+            return false;
+    } else if (!lobby::WheelShape(g_program, g_vao, elements, draw, mid, axle, radius)) {
+        const DrawBounds* b = CachedBounds(draw);
+        if (!b || !b->valid)
+            return false;
+        for (int k = 0; k < 3; ++k)
+            mid[k] = 0.5f * (b->lo[k] + b->hi[k]);
+    }
+    for (int r = 0; r < 3; ++r)
+        at[r] = toBike[r] * mid[0] + toBike[4 + r] * mid[1] + toBike[8 + r] * mid[2] + toBike[12 + r];
+    for (int i = 0; i < 2; ++i) {
+        const double dz = at[2] - (i ? f.halfWheelbase : -f.halfWheelbase);
+        if (std::fabs(at[0]) <= 0.25 && std::fabs(at[1]) <= 0.4 && std::fabs(dz) <= 0.35) {
+            static std::vector<int> logged;
+            const int key = draw.count * 4 + i * 2 + (known ? 1 : 0);
+            if (logged.size() < 30 && std::find(logged.begin(), logged.end(), key) == logged.end()) {
+                logged.push_back(key);
+                Log("postfx: tire dirt: mud on a wheel at your %s axle (%d indices, %.2f m across, %.2f m up, %.2f m along from it%s)",
+                    i ? "front" : "rear", draw.count, at[0], at[1], dz, known ? "" : "; by its shape, not seen turning yet");
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// Your bike's own parts, learnt: a mesh is one once it has kept its place on your bike (within 35 cm:
+// the suspension, the steering) while your bike travelled 4 m. Someone else's bike alongside never does
+// (it moves about against yours), and parked next to yours it doesn't travel. Once any is known and
+// drawn lately, only those get the dirt, each where it was learnt on your bike: a bike of another model
+// stood against yours never, one of your model only where its part is within 35 cm of yours (in it).
+// Until then (just joined, not ridden yet), what's in your bike's box, as before.
+struct OwnPartMemo {
+    BodyCall call;
+    double   ref[3] = {};       // its model's origin on your bike (metres)
+    double   travel = 0.0;      // metres your bike travelled with it there
+    unsigned counted = 0;       // the last frame counted
+    bool     known = false;
+};
+std::vector<OwnPartMemo> g_ownParts;
+unsigned g_ownKnownSeen = 0;     // the last frame a known part of yours was drawn
+constexpr double kOwnPartTravel = 4.0, kOwnPartSlack = 0.35;
+
+bool KeepOwnPart(const DrawCall& draw, const double toBike[16], const BodyFrame& f)
+{
+    const BodyCall c = MakeBodyCall(draw);
+    OwnPartMemo* m = nullptr;
+    for (OwnPartMemo& o : g_ownParts)
+        if (SameBodyCall(o.call, c)) {
+            m = &o;
+            break;
+        }
+    const bool learnt = g_ownKnownSeen != 0 && g_frameNumber - g_ownKnownSeen <= 120;
+    if (!m) {
+        if (g_ownParts.size() >= 256)
+            return !learnt;
+        g_ownParts.push_back(OwnPartMemo{});
+        m = &g_ownParts.back();
+        m->call = c;
+        std::copy(toBike + 12, toBike + 15, m->ref);
+    }
+    const double dx = toBike[12] - m->ref[0], dy = toBike[13] - m->ref[1], dz = toBike[14] - m->ref[2];
+    const bool inPlace = dx * dx + dy * dy + dz * dz <= kOwnPartSlack * kOwnPartSlack;
+    if (m->known) {
+        if (inPlace)
+            g_ownKnownSeen = g_frameNumber;
+        else if (learnt) {
+            static int told = 0;
+            if (told < 10) {
+                ++told;
+                Log("bike dirt: left out a part of your bike's model %.2f m from where it sits on yours (another bike's)",
+                    std::sqrt(dx * dx + dy * dy + dz * dz));
+            }
+        }
+        return inPlace;
+    }
+    // Learning (only from your bike as found, not as held).
+    if (f.fresh && m->counted != g_frameNumber) {
+        if (inPlace) {
+            m->travel += f.moved;
+        } else {
+            std::copy(toBike + 12, toBike + 15, m->ref);
+            m->travel = 0.0;
+        }
+        m->counted = g_frameNumber;
+        if (m->travel >= kOwnPartTravel) {
+            m->known = true;
+            g_ownKnownSeen = g_frameNumber;
+            static int told = 0;
+            if (told < 60) {
+                ++told;
+                Log("bike dirt: learnt a part of your bike (%d indices, %.2f m across, %.2f m up, %.2f m along)", draw.count, m->ref[0],
+                    m->ref[1], m->ref[2]);
+            }
+        }
+    }
+    if (learnt) {
+        static int told = 0;
+        if (told < 10) {
+            ++told;
+            Log("bike dirt: left out a part in your bike's space that isn't one of its own (%d indices)", draw.count);
+        }
+    }
+    return !learnt;
+}
+
+struct BodyProgram {
+    bool  looked = false;
+    GLint amount = -1, toBike = -1, bikeView = -1, params = -1, metre = -1;
+    float set = 0.0f;                          // u_mx_body as it holds
+    float paramsSet[4] = { -1, -1, -1, -1 };
+    float metreSet = -1.0f;
+};
+std::unordered_map<GLuint, BodyProgram> g_bodyPrograms;
+
+void PaintBikeDirt(const DrawCall& draw, bool tire)
+{
+    if (!g_program)
+        return;
+    BodyProgram& p = g_bodyPrograms[g_program];
+    if (!p.looked) {
+        p.looked = true;
+        if (real_glGetUniformLocation) {
+            p.amount = real_glGetUniformLocation(g_program, "u_mx_body");
+            if (p.amount >= 0) {
+                p.toBike = real_glGetUniformLocation(g_program, "u_mx_tobike");
+                p.bikeView = real_glGetUniformLocation(g_program, "u_mx_bikeview");
+                p.params = real_glGetUniformLocation(g_program, "u_mx_bodyp");
+                p.metre = real_glGetUniformLocation(g_program, "u_mx_metre");
+            }
+        }
+    }
+    if (p.amount < 0 || !real_glUniform1f)
+        return;
+    const Config& cfg = GetConfig();
+    float want = 0.0f;
+    if (!tire && cfg.shaders && cfg.bikeDirt > 0.0 && real_glUniformMatrix4fv && real_glUniformMatrix3fv && real_glUniform4fv &&
+        p.toBike >= 0 && p.bikeView >= 0) {
+        const auto mv = g_programModelview.find(g_program);
+        BodyFrame& f = CurrentBodyFrame();
+        double toBike[16], where[3];
+        const bool scene = mv != g_programModelview.end() && mv->second.frame == g_frameNumber &&
+                           mv->second.kind == ModelviewKind::Scene && !mv->second.transposed;
+        if (scene)
+            FollowBodyAnchor(draw, mv->second, f);
+        if (f.have && scene && OwnBikePart(draw, mv->second, f, toBike, where) && KeepOwnPart(draw, toBike, f)) {
+            ++f.parts;
+            if (f.fresh)
+                LearnBodyAnchor(draw, mv->second, toBike);
+            // Directions in the view as drawn (u_modelview: ours, with the camera mod) -> the part's
+            // model -> your bike.
+            double uploaded[16], fromView[16], viewToBike[16];
+            for (int k = 0; k < 16; ++k)
+                uploaded[k] = mv->second.uploaded[k];
+            if (InverseAffine(uploaded, fromView)) {
+                Mul4(toBike, fromView, viewToBike);
+                GLfloat m4[16], m3[9];
+                for (int k = 0; k < 16; ++k)
+                    m4[k] = static_cast<GLfloat>(toBike[k]);
+                for (int c = 0; c < 3; ++c)
+                    for (int r = 0; r < 3; ++r)
+                        m3[c * 3 + r] = static_cast<GLfloat>(viewToBike[c * 4 + r]);
+                real_glUniformMatrix4fv(p.toBike, 1, GL_FALSE, m4);
+                real_glUniformMatrix3fv(p.bikeView, 1, GL_FALSE, m3);
+                postfx::WetLook look;
+                const float wet = postfx::GetWetLook(look) ? std::min(1.0f, look.wet) : 0.0f;
+                const float params[4] = { static_cast<float>(f.halfWheelbase), wet, cfg.weather == kWeatherSnow ? 1.0f : 0.0f, 0.0f };
+                if (p.params >= 0 && std::memcmp(params, p.paramsSet, sizeof params) != 0) {
+                    real_glUniform4fv(p.params, 1, params);
+                    std::memcpy(p.paramsSet, params, sizeof params);
+                }
+                const float metre = static_cast<float>(f.unitsPerMetre);
+                if (p.metre >= 0 && metre != p.metreSet) {
+                    real_glUniform1f(p.metre, metre);
+                    p.metreSet = metre;
+                }
+                want = static_cast<float>(cfg.bikeDirt);
+                // (For the log: each part once, where it sits on your bike.)
+                static std::vector<int> logged;
+                if (logged.size() < 40 && std::find(logged.begin(), logged.end(), draw.count) == logged.end()) {
+                    logged.push_back(draw.count);
+                    Log("bike dirt: on a part of your bike (program %u, %d indices, its middle %.2f m across, %.2f m up, %.2f m along)",
+                        g_program, draw.count, where[0], where[1], where[2]);
+                }
+            }
+        }
+    }
+    if (want != p.set) {
+        real_glUniform1f(p.amount, want);
+        p.set = want;
     }
 }
 
@@ -4828,7 +5679,7 @@ bool NoteDraw(const DrawCall& draw)
             CastShadow(draw);
             postfx::NoteCastNowMs(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - castStart).count());
         }
-        PaintTireDirt(draw);
+        PaintBikeDirt(draw, PaintTireDirt(draw));
         PaintWet();
         return true;
     }

@@ -119,6 +119,19 @@ struct OwnAnchors {
 };
 bool GetOwnAnchors(OwnAnchors& out);
 
+// Your bike for the dirt on its body (proc_hooks PaintBikeDirt): its model in the game's own camera
+// space (the raw view the game drew with, times the model) as last found, the bike model's own axes,
+// and where its axles sit on it (its own space, game units: learnt, or MX Simulator's usual place).
+// False when your bike isn't found.
+struct OwnBikeFrame {
+    double inRaw[16] = {};
+    double forward[3] = { 0, 0, -1 }, up[3] = { 0, 1, 0 };
+    double rearAxle[3] = {}, frontAxle[3] = {};
+    bool   learnt[2] = { false, false };
+    double unitsPerMetre = 3.2808;
+};
+bool GetOwnBikeFrame(OwnBikeFrame& out);
+
 // For the look keys in third person (they swing the camera round your rider): true while the
 // game's camera is in third person and your rider was seen last frame, with the middle of your
 // rider and bike in that frame's raw camera eye space (the chase camera follows you, so it holds

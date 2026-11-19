@@ -200,6 +200,8 @@ struct Config {
                                           // so the near lip covers the floor and the far side
                                           // shows at low angles (0: flat on the ground)
     double tireDirt         = 0.6;        // 0..1 mud caked on your tires
+    double bikeDirt         = 0.5;        // 0..1 mud and dust on your own bike's body (frame, plastics,
+                                          // engine, swingarm, fork): your bike only, never other bikes
     double roost            = 0.7;        // 0..1 the dirt your rear tire throws (dust and clods; most on the gas
                                           // and sliding through turns); 0 = off (postfx Roost)
     double roostDust        = 0.7;        // 0..1 how much fine dust there is in it (hangs in the air behind you)
