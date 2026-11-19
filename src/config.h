@@ -217,6 +217,7 @@ struct Config {
     bool   hideCursor       = false;      // hide the game's mouse cursor while riding (same)
     double brakeSqueal      = 0.0;        // 0..1 the brake squeal's loudness (brake.cpp; 0 = off): OTHER, SOUND MODS
     bool   dabIndicator     = false;      // bottom right: red standing, green while the game's Sit/Dab key sits you (dab.cpp)
+    bool   lapTimer         = false;      // your laps timed from the track's own timing gates (laptimer.h); where: LapTimerPlace
     int    dabSticky        = 0;          // the indicator's Sticky Sit/Dab: 0 = as the game's config file says, 1 = off
                                           // (held), 2 = on (a press switches). The game writes its file only now and
                                           // then (not when the setting is changed), so it can say the old one.
@@ -271,6 +272,15 @@ void ForgetLearned(const char* key);
 // MenuSize, written as soon as a drag ends. Not part of the presets or DEFAULTS. 1 when not saved.
 double ReadMenuSize();
 void WriteMenuSize(double size);
+
+// The lap timer's panel (Config::lapTimer): where it is (its top left, a share of the window's width
+// and height), its size (1 the usual) and whether it's pinned (can't be dragged). Saved as it's moved.
+struct LapTimerPlace {
+    double x = 0.012, y = 0.16, size = 1.0;
+    bool   pinned = false;
+};
+LapTimerPlace ReadLapTimerPlace();
+void WriteLapTimerPlace(const LapTimerPlace& place);
 // Puts the camera and graphics tunables back to their defaults; keys and detection settings are untouched.
 void ResetTunables();
 

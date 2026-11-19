@@ -60,6 +60,7 @@
 #include "dab.h"
 #include "gamepad.h"
 #include "hooks.h"
+#include "laptimer.h"
 #include "lobby_wheels.h"
 #include "log.h"
 #include "overlay.h"
@@ -1726,6 +1727,8 @@ void NoteTerrainUniform(GLint location, GLsizei count, const GLfloat* value, int
             last[1] = second;
             terrain::ResetMap();
             postfx::MarksNewTrack();  // the ground of the marks is another track's as well
+            laptimer::NewTrack();     // (and the laps timed: the old track's)
+            laptimer::SetTerrain(g_heightmapUpload[0][0]);  // (its spacing: which tracks it can be)
             g_variants.clear();
             g_loggedBigCasters = 0;  // (another track: log what's left out of it too)
             g_stadiumTrack = false;
@@ -1867,6 +1870,8 @@ void FinishTerrainPass()
         // were pressed in, however equal its heightmap's numbers came in (a track whose spacing and
         // width match the one before is otherwise missed).
         postfx::MarksNewTrack();
+        laptimer::NewTrack();  // (the lap timer's track and laps too)
+        laptimer::SetTerrain(g_heightmapUpload[0][0]);
         g_variants.clear();
         g_mapProgram = g_program;
     }
@@ -3954,6 +3959,8 @@ struct BodyFrame {
     double   unitsPerMetre = 3.2808;
     bool     axlesLearnt = false;   // both axles where they were learnt on your bike (not the usual place)
     int      parts = 0;             // parts given the dirt this frame (for the log)
+    unsigned anchoredFrame = 0;     // the last frame placed by its anchor (exact for what's drawn after it)
+    unsigned jumpFrames = 0;        // frames running your bike was found far from where it was held
     bool     haveWorld = false;
     double   world[3] = {};         // your bike's middle in the world as placed at the frame's start (game units)
     double   moved = 0.0;           // metres it moved since the last frame (0 after a jump of over 2 m)
@@ -3987,7 +3994,16 @@ BodyCall MakeBodyCall(const DrawCall& draw)
 }
 struct BodyAnchor {
     bool     have = false;
+    // Where it sits on your bike, as an average over its first 30 frames found, then kept (where your
+    // bike is found wobbles by half a metre from frame to frame in third person; once settled, it's
+    // what places your bike, every frame, the moment it's drawn - everything on your bike is rigid
+    // with it, so drawn after it, steady).
+    bool     settled = false;
+    int      samples = 0;
+    double   sum[16] = {};
+    unsigned learnFrame = 0;    // the frame it was last learnt from (twice in one: drawn twice)
     bool     haveWorld = false;
+    unsigned worldFrame = 0;    // the frame world was set
     double   world[3] = {};     // its model's origin in the world, as last seen on your bike (game units)
     BodyCall call;
     unsigned seen = 0;          // the last frame it was drawn as a part of your bike
@@ -4097,19 +4113,44 @@ BodyFrame& CurrentBodyFrame()
     // your rider: stood beside your bike, next to someone else's, it was theirs, and the dirt went on
     // it). Not taken while its biggest part still places it where it was (FollowBodyAnchor keeps it
     // placed); taken once that's lost too (a respawn).
+    // (Found there for 2 s on end, it's believed: the part followed may be someone else's.)
     if (found && f.placed && g_frameNumber - f.placedFrame <= 2) {
         const double jump = std::sqrt(BikeMiddleApart(fromRaw, f.fromRaw)) / u;
-        if (jump > 1.0) {
+        if (jump > 1.0 && ++f.jumpFrames <= 256) {
             static int told = 0;
             if (told < 10) {
                 ++told;
                 Log("bike dirt: your bike found %.2f m from where it was a frame ago: held where it was, following its biggest part", jump);
             }
             found = false;
+        } else if (jump > 1.0) {
+            Log("bike dirt: your bike found %.2f m from where it was held for 2 s: taken", jump);
         }
     }
+    if (found)
+        f.jumpFrames = 0;
+    // (Tests: MXCAM_TEST_WOBBLE - from frame 100, once its parts are learnt, your bike placed half a
+    // metre off every other 6 frames - to its side and down - as the game's own wobbles it in third
+    // person.)
+    // (MXCAM_TEST_WOBBLE=early: from the start, before anything is learnt.)
+    static const int wobble = [] {
+        char text[16] = "";
+        if (GetEnvironmentVariableA("MXCAM_TEST_WOBBLE", text, sizeof text) <= 0)
+            return 0;
+        return strcmp(text, "early") == 0 ? 2 : 1;
+    }();
+    if (found && wobble && g_frameNumber >= (wobble == 2 ? 0u : 100u) && (g_frameNumber / 6) % 2 == 1)
+    {
+        fromRaw[12] += 0.35;
+        fromRaw[13] += 0.35;
+    }
+    // (Once your bike is placed from its biggest part, a frame starts where the last one left it - the
+    // camera rides with you - not where your bike is found, which wobbles: the parts drawn before that
+    // part are steady too.)
+    const bool keepAnchored = found && g_bodyAnchor.settled && f.anchoredFrame + 1 == g_frameNumber;
     if (found) {
-        std::copy(fromRaw, fromRaw + 16, f.fromRaw);
+        if (!keepAnchored)
+            std::copy(fromRaw, fromRaw + 16, f.fromRaw);
         f.halfWheelbase = hw;
         f.unitsPerMetre = u;
         f.axlesLearnt = learnt;
@@ -4145,7 +4186,9 @@ BodyFrame& CurrentBodyFrame()
         if (f.haveWorld) {
             const double dx = w[0] - f.world[0], dy = w[1] - f.world[1], dz = w[2] - f.world[2];
             const double d = std::sqrt(dx * dx + dy * dy + dz * dz) / f.unitsPerMetre;
-            f.moved = d < 2.0 ? d : 0.0;
+            // (Over 40 cm in a frame isn't riding - 40 m/s is 31 cm - it's where your bike is placed
+            // jumping: counted as travel, it had a part stood against your bike learnt as yours.)
+            f.moved = d < 0.4 ? d : 0.0;
         }
         std::copy(w, w + 3, f.world);
         f.haveWorld = true;
@@ -4176,7 +4219,8 @@ bool OriginInWorld(const ProgramModelview& mv, double out[3])
 void FollowBodyAnchor(const DrawCall& draw, const ProgramModelview& mv, BodyFrame& f)
 {
     BodyAnchor& a = g_bodyAnchor;
-    if (!a.have || f.fresh || !f.have || f.placedFrame == g_frameNumber || !SameBodyCall(a.call, MakeBodyCall(draw)))
+    if (!a.have || !f.have || f.anchoredFrame == g_frameNumber || (f.fresh && !a.settled) ||
+        (!f.fresh && f.placedFrame == g_frameNumber) || !SameBodyCall(a.call, MakeBodyCall(draw)))
         return;
     double raw[16], inv[16], now[16];
     for (int k = 0; k < 16; ++k)
@@ -4186,6 +4230,9 @@ void FollowBodyAnchor(const DrawCall& draw, const ProgramModelview& mv, BodyFram
     double world[3];
     const bool haveWorld = OriginInWorld(mv, world);
     double worldMove = 1e9;
+    // (Within a metre of where it was last seen - and as far again as a fast bike goes since: 40 m/s at
+    // 128 frames a second. Kept to a metre, a part last seen a few frames before was 3 m on and lost.)
+    const double reach = std::min(6.0, 1.0 + 0.32 * static_cast<double>(g_frameNumber - a.worldFrame));
     if (haveWorld && a.haveWorld) {
         const double wx = world[0] - a.world[0], wy = world[1] - a.world[1], wz = world[2] - a.world[2];
         worldMove = std::sqrt(wx * wx + wy * wy + wz * wz) / f.unitsPerMetre;
@@ -4195,7 +4242,7 @@ void FollowBodyAnchor(const DrawCall& draw, const ProgramModelview& mv, BodyFram
     // (Tests: MXCAM_TEST_FOLLOW_WORLD - only the world's check, as if the camera had swung away.)
     static const bool worldOnly = GetEnvironmentVariableA("MXCAM_TEST_FOLLOW_WORLD", nullptr, 0) > 0;
     const double viewMove = worldOnly ? 1e9 : std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (worldMove > 1.0 && viewMove > 0.5) {
+    if (worldMove > reach && viewMove > 0.5) {
         static int told = 0;
         if (told < 10) {
             ++told;
@@ -4206,27 +4253,67 @@ void FollowBodyAnchor(const DrawCall& draw, const ProgramModelview& mv, BodyFram
     }
     Mul4(a.toBike, inv, f.fromRaw);
     f.placedFrame = g_frameNumber;
+    f.anchoredFrame = g_frameNumber;
     a.seen = g_frameNumber;
     if (haveWorld) {
         std::copy(world, world + 3, a.world);
         a.haveWorld = true;
+        a.worldFrame = g_frameNumber;
     }
 }
 
 // A part given the dirt while your bike was found: the anchor is the biggest one drawn lately.
+// (A mesh drawn twice on your bike - a left and a right fork leg - is never the anchor: learnt from one
+// copy and following the other, your bike was placed the gap between them off.)
+std::vector<BodyCall> g_anchorTwice;
+
 void LearnBodyAnchor(const DrawCall& draw, const ProgramModelview& mv, const double toBike[16])
 {
     BodyAnchor& a = g_bodyAnchor;
     const BodyCall c = MakeBodyCall(draw);
+    for (const BodyCall& twice : g_anchorTwice)
+        if (SameBodyCall(twice, c))
+            return;
     const bool same = a.have && SameBodyCall(a.call, c);
+    if (same && a.learnFrame == g_frameNumber) {
+        if (g_anchorTwice.size() < 64)
+            g_anchorTwice.push_back(c);
+        a.have = false;
+        static int told = 0;
+        if (told < 5) {
+            ++told;
+            Log("bike dirt: a part drawn twice on your bike (%d indices): not the one followed", draw.count);
+        }
+        return;
+    }
     const bool stale = !a.have || g_frameNumber - a.seen > 60;
     if (!same && !stale && draw.count <= a.call.draw.count)
         return;
-    a.have = true;
-    a.call = c;
+    if (!same) {
+        a = BodyAnchor{};
+        a.have = true;
+        a.call = c;
+    }
+    a.learnFrame = g_frameNumber;
     a.seen = g_frameNumber;
-    std::copy(toBike, toBike + 16, a.toBike);
+    if (!a.settled) {
+        ++a.samples;
+        for (int k = 0; k < 16; ++k) {
+            a.sum[k] += toBike[k];
+            a.toBike[k] = a.sum[k] / a.samples;
+        }
+        if (a.samples >= 30) {
+            a.settled = true;
+            static int told = 0;
+            if (told < 10) {
+                ++told;
+                Log("bike dirt: your bike is placed from its biggest part from now on (%d indices, its origin %.2f m across, %.2f m up, "
+                    "%.2f m along)", draw.count, a.toBike[12], a.toBike[13], a.toBike[14]);
+            }
+        }
+    }
     a.haveWorld = OriginInWorld(mv, a.world);
+    a.worldFrame = g_frameNumber;
 }
 
 // Whether the draw about to be made is a part of your bike's body; toBike: its model -> your bike.
@@ -4269,7 +4356,19 @@ bool OwnBikePart(const DrawCall& draw, const ProgramModelview& mv, const BodyFra
         extent[c] = size[c] * scale;
     }
     const double hw = f.halfWheelbase;
-    if (std::fabs(at[0]) > 0.42 || at[1] < -0.4 || at[1] > 0.85 || at[2] < -hw - 0.45 || at[2] > hw + 0.45)
+    // (Its middle no lower than 25 cm under the axles: the ground is about 35 cm under them - a start
+    // gate's grate under you had its middle there, in the box, and the dirt.)
+    if (std::fabs(at[0]) > 0.42 || at[1] < -0.25 || at[1] > 0.85 || at[2] < -hw - 0.45 || at[2] > hw + 0.45)
+        return false;
+    // Its size along your bike's own axes (across, up, along): nothing on a bike is wider than its bars
+    // (a metre), nor flat, low and big (a grate, a mat: under 10 cm thick, under the axles, over half a
+    // metre either way).
+    double span[3];
+    for (int r = 0; r < 3; ++r)
+        span[r] = std::fabs(toBike[r]) * size[0] + std::fabs(toBike[4 + r]) * size[1] + std::fabs(toBike[8 + r]) * size[2];
+    if (span[0] > 1.0)
+        return false;
+    if (span[1] < 0.1 && at[1] < 0.0 && std::max(span[0], span[2]) > 0.5)
         return false;
     const double biggest = std::max(extent[0], std::max(extent[1], extent[2]));
     if (biggest > 2.6)
@@ -4483,31 +4582,153 @@ bool AtOwnAxle(const DrawCall& draw)
 }
 
 // Your bike's own parts, learnt: a mesh is one once it has kept its place on your bike (within 35 cm:
-// the suspension, the steering) while your bike travelled 4 m. Someone else's bike alongside never does
-// (it moves about against yours), and parked next to yours it doesn't travel. Once any is known and
-// drawn lately, only those get the dirt, each where it was learnt on your bike: a bike of another model
-// stood against yours never, one of your model only where its part is within 35 cm of yours (in it).
-// Until then (just joined, not ridden yet), what's in your bike's box, as before.
-struct OwnPartMemo {
-    BodyCall call;
+// the suspension, the steering) while your bike travelled 3 m. Someone else's bike alongside never does
+// (it moves about against yours), and parked next to yours it doesn't travel. Each place a mesh is
+// drawn on your bike is learnt on its own (a left and a right fork leg can be one mesh drawn twice).
+// Once any is known and drawn lately, the parts not known don't get the dirt (a bike of another model
+// stood against yours). A known one does in its place on your bike - or, wherever your bike is placed
+// (in third person that wobbles from one frame to the next by half a metre and more: kept to its place,
+// your own parts lost their dirt, and once wrongly placed never got it back), if it's drawn where it was
+// in the world a frame ago (as far on as a fast bike goes): your bike's own part follows itself, another
+// bike's copy, of your model, beside yours, is the gap between them away. Until then (just joined, not
+// ridden yet), what's in your bike's box, as before.
+struct OwnPartPlace {
     double   ref[3] = {};       // its model's origin on your bike (metres)
     double   travel = 0.0;      // metres your bike travelled with it there
     unsigned counted = 0;       // the last frame counted
     bool     known = false;
+    unsigned offFrames = 0;     // frames running drawn off its place (following itself)
+    unsigned seenFrame = 0;     // the last frame a draw of the mesh was taken for this place
+    bool     haveWorld = false;
+    double   world[3] = {};     // its model's origin in the world when last taken for yours (game units)
+    unsigned worldFrame = 0;
+    bool     haveVelocity = false;
+    double   velocity[3] = {};  // its move the frame before (game units a frame)
+    // Where it sits on your bike, kept from when it was learnt: its dirt is drawn from this, never from
+    // where your bike is placed this frame (that wobbles: the mud slid up and down your bike with it,
+    // and on a part placed high, all but went - the tire dirt, worked out on the tire alone, never did).
+    bool     haveMatrix = false;
+    double   toBike[16] = {};
+};
+struct OwnPartMemo {
+    BodyCall                  call;
+    std::vector<OwnPartPlace> places;  // (4 at most)
 };
 std::vector<OwnPartMemo> g_ownParts;
 unsigned g_ownKnownSeen = 0;     // the last frame a known part of yours was drawn
-constexpr double kOwnPartTravel = 4.0, kOwnPartSlack = 0.35;
+constexpr double kOwnPartTravel = 3.0, kOwnPartSlack = 0.35, kOwnPartDrift = 1.2;
 
+OwnPartMemo* FindOwnPart(const BodyCall& c)
+{
+    for (OwnPartMemo& o : g_ownParts)
+        if (SameBodyCall(o.call, c))
+            return &o;
+    return nullptr;
+}
+
+double PlaceApart(const OwnPartPlace& place, const double toBike[16])
+{
+    const double dx = toBike[12] - place.ref[0], dy = toBike[13] - place.ref[1], dz = toBike[14] - place.ref[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// A known part of yours: 1 (yours: in its place, or following itself in the world), 0 (not yours: a
+// copy of it off its place and away from where yours was), -1 (not a known part here: the box and the
+// learning decide).
+int KnownOwnPart(const DrawCall& draw, const ProgramModelview& mv, const BodyFrame& f, const double toBike[16], bool& exact,
+                 const double** fixed)
+{
+    exact = false;
+    *fixed = nullptr;
+    OwnPartMemo* m = FindOwnPart(MakeBodyCall(draw));
+    if (!m)
+        return -1;
+    double world[3];
+    const bool haveWorld = OriginInWorld(mv, world);
+    // The place it's nearest: on your bike, or (placed off) in the world.
+    OwnPartPlace* nearest = nullptr;
+    double apart = 1e9;
+    bool follows = false;
+    for (OwnPartPlace& place : m->places) {
+        if (!place.known)
+            continue;
+        const double d = PlaceApart(place, toBike);
+        bool self = false;
+        if (haveWorld && place.haveWorld && place.worldFrame + 64 >= g_frameNumber) {
+            // (Where it was gone on as it was going - its last frame's move - within 25 cm, and 8 cm more
+            // each frame since: a bike's part moves smoothly. Not more: one mesh drawn twice on your bike,
+            // 39 cm apart, was taken for the one copy.)
+            const double frames = static_cast<double>(g_frameNumber - place.worldFrame);
+            const double ahead = place.haveVelocity ? frames : 0.0;
+            const double reach = std::min(3.0, 0.25 + 0.08 * frames + (place.haveVelocity ? 0.0 : 0.32 * frames));
+            const double wx = world[0] - place.world[0] - place.velocity[0] * ahead, wy = world[1] - place.world[1] - place.velocity[1] * ahead,
+                         wz = world[2] - place.world[2] - place.velocity[2] * ahead;
+            self = std::sqrt(wx * wx + wy * wy + wz * wz) / f.unitsPerMetre <= reach;
+        }
+        if ((self && !follows) || ((self || !follows) && d < apart)) {
+            apart = d;
+            nearest = &place;
+            follows = self;
+        }
+    }
+    if (!nearest)
+        return -1;
+    const bool inPlace = apart <= kOwnPartSlack;
+    if (!inPlace && !follows) {
+        if (apart > kOwnPartDrift)
+            return -1;
+        // (Unless it's at a place of the mesh still being learnt: a second fork leg, its first known.)
+        for (const OwnPartPlace& place : m->places)
+            if (!place.known && PlaceApart(place, toBike) <= kOwnPartSlack)
+                return -1;
+        static int told = 0;
+        if (told < 10) {
+            ++told;
+            Log("bike dirt: left out a part of your bike's model %.2f m from its place on yours, not where yours was "
+                "(another bike's)", apart);
+        }
+        return 0;
+    }
+    nearest->seenFrame = g_frameNumber;
+    if (haveWorld) {
+        // (Its move a frame, from where it was the frame before: for where it should be next.)
+        nearest->haveVelocity = nearest->haveWorld && nearest->worldFrame + 1 == g_frameNumber;
+        for (int k = 0; k < 3 && nearest->haveVelocity; ++k)
+            nearest->velocity[k] = world[k] - nearest->world[k];
+        std::copy(world, world + 3, nearest->world);
+        nearest->haveWorld = true;
+        nearest->worldFrame = g_frameNumber;
+    }
+    g_ownKnownSeen = g_frameNumber;
+    if (nearest->haveMatrix)
+        *fixed = nearest->toBike;
+    if (inPlace) {
+        nearest->offFrames = 0;
+        exact = true;
+        return 1;
+    }
+    // Off its place, following itself: yours, where your bike is placed is off. Off it for 2 s on end
+    // (and more than wobbling: over 35 cm all along): its place was learnt wrong - learnt again here.
+    if (++nearest->offFrames > 256) {
+        std::copy(toBike + 12, toBike + 15, nearest->ref);
+        std::copy(toBike, toBike + 16, nearest->toBike);
+        nearest->haveMatrix = true;
+        nearest->offFrames = 0;
+        static int told = 0;
+        if (told < 10) {
+            ++told;
+            Log("bike dirt: a part of your bike (%d indices) has been %.2f m off its place for 2 s: its place learnt again", draw.count, apart);
+        }
+    }
+    return 1;
+}
+
+// A part in your bike's box, not a known one here: learnt (each place it's drawn on its own), and
+// given the dirt until any part of yours is known.
 bool KeepOwnPart(const DrawCall& draw, const double toBike[16], const BodyFrame& f)
 {
     const BodyCall c = MakeBodyCall(draw);
-    OwnPartMemo* m = nullptr;
-    for (OwnPartMemo& o : g_ownParts)
-        if (SameBodyCall(o.call, c)) {
-            m = &o;
-            break;
-        }
+    OwnPartMemo* m = FindOwnPart(c);
     const bool learnt = g_ownKnownSeen != 0 && g_frameNumber - g_ownKnownSeen <= 120;
     if (!m) {
         if (g_ownParts.size() >= 256)
@@ -4515,51 +4736,81 @@ bool KeepOwnPart(const DrawCall& draw, const double toBike[16], const BodyFrame&
         g_ownParts.push_back(OwnPartMemo{});
         m = &g_ownParts.back();
         m->call = c;
-        std::copy(toBike + 12, toBike + 15, m->ref);
     }
-    const double dx = toBike[12] - m->ref[0], dy = toBike[13] - m->ref[1], dz = toBike[14] - m->ref[2];
-    const bool inPlace = dx * dx + dy * dy + dz * dz <= kOwnPartSlack * kOwnPartSlack;
-    if (m->known) {
-        if (inPlace)
-            g_ownKnownSeen = g_frameNumber;
-        else if (learnt) {
-            static int told = 0;
-            if (told < 10) {
-                ++told;
-                Log("bike dirt: left out a part of your bike's model %.2f m from where it sits on yours (another bike's)",
-                    std::sqrt(dx * dx + dy * dy + dz * dz));
-            }
+    // (Places not learnt and not seen for 30 frames go: ones where your bike was placed wobbling, before
+    // it was placed from its biggest part - left, the real place never learnt, with "another" never
+    // seen in the same frame.)
+    m->places.erase(std::remove_if(m->places.begin(), m->places.end(),
+                                   [](const OwnPartPlace& p) { return !p.known && p.seenFrame + 30 < g_frameNumber; }),
+                    m->places.end());
+    // Its place here: the nearest within 35 cm, else a new one (4 at most: else the least ridden with).
+    OwnPartPlace* place = nullptr;
+    double apart = 1e9;
+    for (OwnPartPlace& candidate : m->places) {
+        const double d = PlaceApart(candidate, toBike);
+        if (d <= kOwnPartSlack && d < apart) {
+            apart = d;
+            place = &candidate;
         }
-        return inPlace;
     }
-    // Learning (only from your bike as found, not as held).
-    if (f.fresh && m->counted != g_frameNumber) {
-        if (inPlace) {
-            m->travel += f.moved;
+    if (!place) {
+        if (m->places.size() < 4) {
+            m->places.push_back(OwnPartPlace{});
+            place = &m->places.back();
         } else {
-            std::copy(toBike + 12, toBike + 15, m->ref);
-            m->travel = 0.0;
+            place = &m->places.front();
+            for (OwnPartPlace& candidate : m->places)
+                if (!candidate.known && candidate.travel < place->travel)
+                    place = &candidate;
+            if (place->known)
+                return !learnt;  // (four known places: this isn't one of them)
+            *place = OwnPartPlace{};
         }
-        m->counted = g_frameNumber;
-        if (m->travel >= kOwnPartTravel) {
-            m->known = true;
+        std::copy(toBike + 12, toBike + 15, place->ref);
+    }
+    // Learning (only from your bike as found, not as held). A second place of a mesh only in frames
+    // another of its places is drawn in too: two fork legs are drawn every frame, both; where your bike
+    // is placed switching between two spots (another part of it taken for it) gives one mesh two places
+    // that never are - learnt, the second let a bike of your model beside yours have the dirt.
+    // (Drawn the frame before too, with another of its places this frame or the last: whichever of two
+    // is drawn first each frame.)
+    bool together = m->places.size() <= 1;
+    if (!together && place->seenFrame + 1 == g_frameNumber)
+        for (const OwnPartPlace& other : m->places)
+            together = together || (&other != place && other.seenFrame + 1 >= g_frameNumber);
+    place->seenFrame = g_frameNumber;
+    if ((f.fresh || f.anchoredFrame == g_frameNumber) && together && place->counted != g_frameNumber && !place->known) {
+        place->travel += f.moved;
+        place->counted = g_frameNumber;
+        if (place->travel >= kOwnPartTravel) {
+            place->known = true;
+            std::copy(toBike, toBike + 16, place->toBike);
+            place->haveMatrix = true;
             g_ownKnownSeen = g_frameNumber;
             static int told = 0;
             if (told < 60) {
                 ++told;
-                Log("bike dirt: learnt a part of your bike (%d indices, %.2f m across, %.2f m up, %.2f m along)", draw.count, m->ref[0],
-                    m->ref[1], m->ref[2]);
+                Log("bike dirt: learnt a part of your bike (%d indices, %.2f m across, %.2f m up, %.2f m along)", draw.count, place->ref[0],
+                    place->ref[1], place->ref[2]);
             }
         }
     }
-    if (learnt) {
+    if (place->known)
+        return true;  // (learnt just now)
+    // Not learnt yet: with none of your parts known, what's in the box; else once it has kept its place
+    // on your bike for half a metre of your riding - your own parts do within moments, a parked bike's
+    // never (riding by, yours moves against it). (Left out till learnt, your bike's body never got the
+    // dirt: its front parts were learnt first, the body's places were still settling - and then never
+    // given it, nor taken for the part your bike is placed from, which would have settled them.)
+    const bool riddenWith = place->travel >= 0.5;
+    if (learnt && !riddenWith) {
         static int told = 0;
         if (told < 10) {
             ++told;
-            Log("bike dirt: left out a part in your bike's space that isn't one of its own (%d indices)", draw.count);
+            Log("bike dirt: left out a part in your bike's space not yet ridden with (%d indices)", draw.count);
         }
     }
-    return !learnt;
+    return !learnt || riddenWith;
 }
 
 struct BodyProgram {
@@ -4601,20 +4852,43 @@ void PaintBikeDirt(const DrawCall& draw, bool tire)
                            mv->second.kind == ModelviewKind::Scene && !mv->second.transposed;
         if (scene)
             FollowBodyAnchor(draw, mv->second, f);
-        if (f.have && scene && OwnBikePart(draw, mv->second, f, toBike, where) && KeepOwnPart(draw, toBike, f)) {
+        bool mine = false, exact = false;
+        const double* fixed = nullptr;  // (a known part's own place on your bike)
+        if (f.have && scene) {
+            // A known part of yours: by where it's learnt on your bike (not the box: where your bike is
+            // placed wobbles). Else the box, and the learning.
+            double raw[16];
+            for (int k = 0; k < 16; ++k)
+                raw[k] = mv->second.raw[k];
+            Mul4(f.fromRaw, raw, toBike);
+            const int known = KnownOwnPart(draw, mv->second, f, toBike, exact, &fixed);
+            bool inBox = false;
+            if (known >= 0) {
+                mine = known == 1;
+                for (int r = 0; r < 3; ++r)
+                    where[r] = toBike[12 + r];
+            } else {
+                inBox = OwnBikePart(draw, mv->second, f, toBike, where);
+                mine = inBox && KeepOwnPart(draw, toBike, f);
+                exact = mine;
+            }
+        }
+        if (mine) {
             ++f.parts;
-            if (f.fresh)
-                LearnBodyAnchor(draw, mv->second, toBike);
+            if (f.fresh && exact)
+                LearnBodyAnchor(draw, mv->second, toBike);  // (only from a part in its place)
             // Directions in the view as drawn (u_modelview: ours, with the camera mod) -> the part's
             // model -> your bike.
             double uploaded[16], fromView[16], viewToBike[16];
             for (int k = 0; k < 16; ++k)
                 uploaded[k] = mv->second.uploaded[k];
+            // (A known part: from its own place on your bike, as learnt - steady whatever the placement.)
+            const double* shown = fixed ? fixed : toBike;
             if (InverseAffine(uploaded, fromView)) {
-                Mul4(toBike, fromView, viewToBike);
+                Mul4(shown, fromView, viewToBike);
                 GLfloat m4[16], m3[9];
                 for (int k = 0; k < 16; ++k)
-                    m4[k] = static_cast<GLfloat>(toBike[k]);
+                    m4[k] = static_cast<GLfloat>(shown[k]);
                 for (int c = 0; c < 3; ++c)
                     for (int r = 0; r < 3; ++r)
                         m3[c * 3 + r] = static_cast<GLfloat>(viewToBike[c * 4 + r]);

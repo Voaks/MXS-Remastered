@@ -119,6 +119,11 @@ struct OwnAnchors {
 };
 bool GetOwnAnchors(OwnAnchors& out);
 
+// Where your bike is in the world (game units): its model's origin as last found, else your rider's
+// middle; false when neither was seen in the last quarter second. For the lap timer (laptimer.h),
+// asked at the end of the frame.
+bool OwnPosition(double position[3]);
+
 // Your bike for the dirt on its body (proc_hooks PaintBikeDirt): its model in the game's own camera
 // space (the raw view the game drew with, times the model) as last found, the bike model's own axes,
 // and where its axles sit on it (its own space, game units: learnt, or MX Simulator's usual place).

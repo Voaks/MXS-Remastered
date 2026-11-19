@@ -8590,6 +8590,34 @@ bool GetOwnBikeFrame(OwnBikeFrame& out)
     return true;
 }
 
+bool OwnPosition(double position[3])
+{
+    // Your rider's middle (on the bike), else the middle between your bike's axles - never the bike
+    // model's origin: that can sit metres from the bike (one sat 7 m from it, beside the start gate it
+    // was in), and as the bike turned it swung round it, past the timing gates' ends.
+    const double now = Seconds();
+    if (g_rider.seen && g_riderTime >= 0 && now - g_riderTime < 0.25) {
+        position[0] = g_rider.position.x;
+        position[1] = g_rider.position.y;
+        position[2] = g_rider.position.z;
+        return true;
+    }
+    if (g_bikeNow.found && now - g_bikeNow.at < 0.25) {
+        const BikeModel& b = g_bikeModel;
+        const double u = g_unitsPerMetre;
+        Vec3 mid = (b.forward * (0.74 * u) - b.up * (0.24 * u) + b.forward * (-0.75 * u) - b.up * (0.18 * u)) * 0.5;
+        if (g_wheels[0].onBikeWeight >= kWheelOnBikeMin && g_wheels[1].onBikeWeight >= kWheelOnBikeMin &&
+            WheelPlausibleOnBike(0, g_wheels[0].onBike) && WheelPlausibleOnBike(1, g_wheels[1].onBike))
+            mid = (g_wheels[0].onBike + g_wheels[1].onBike) * 0.5;
+        const Vec3 at = TransformPoint(g_bikeNow.model, mid);
+        position[0] = at.x;
+        position[1] = at.y;
+        position[2] = at.z;
+        return true;
+    }
+    return false;
+}
+
 bool GetOwnAnchors(OwnAnchors& out)
 {
     out = OwnAnchors{};

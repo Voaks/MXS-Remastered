@@ -596,8 +596,8 @@ int main(int argc, char** argv)
     const GLint oColor = gl.GetUniformLocation(object, "u_color");
 
     // Meshes: the unit patch (indices in a buffer, like the game's) and a 1 m cube, and a quad.
-    GLuint arrays[12] = {};
-    gl.GenVertexArrays(12, arrays);
+    GLuint arrays[14] = {};
+    gl.GenVertexArrays(14, arrays);
     const auto mesh = [&](GLuint array, const float* vertices, size_t vertexBytes, int components,
                           const unsigned short* indices, size_t indexBytes, GLuint* made = nullptr) {
         GLuint local[2] = {};
@@ -685,6 +685,17 @@ int main(int argc, char** argv)
     const float otherQuad[12] = { 0, -0.15f * ft, 0.15f * ft,  0, -0.15f * ft, -0.15f * ft,
                                   0, 0.15f * ft, 0.15f * ft,   0, 0.15f * ft, -0.15f * ft };
     mesh(arrays[11], otherQuad, sizeof otherQuad, 3, patchIndices, sizeof patchIndices);
+    // (bikedirt: your bike's frame - a mesh of its own, drawn once: on a real bike the frame and the
+    // engine are; what your bike is followed by while it isn't found. Behind your panel, on the far side.)
+    const float frameQuad[12] = { -0.2f * ft, 1.86f * ft, -1.1f * ft,  -0.2f * ft, 1.86f * ft, -1.7f * ft,
+                                  -0.2f * ft, 2.06f * ft, -1.1f * ft,  -0.2f * ft, 2.06f * ft, -1.7f * ft };
+    mesh(arrays[12], frameQuad, sizeof frameQuad, 3, patchIndices, sizeof patchIndices);
+    // (bikedirt: a start gate's grate under your bike - flat, at the ground, 1 m across, 2 m along - riding
+    // along with it, the worst case: it never moves against your bike. Never dirt on it.)
+    const float grateQuad[12] = { -0.5f * ft, 1.55f * ft, 0.2f * ft,   0.5f * ft, 1.55f * ft, 0.2f * ft,
+                                  -0.5f * ft, 1.55f * ft, -2.2f * ft,  0.5f * ft, 1.55f * ft, -2.2f * ft };
+    const unsigned short grateIndices[12] = { 0, 1, 2, 2, 1, 3,  0, 2, 1, 2, 3, 1 };  // (both faces: 12, its own count, for the log)
+    mesh(arrays[13], grateQuad, sizeof grateQuad, 3, grateIndices, sizeof grateIndices);
     gl.BindVertexArray(0);
 
     // A texture the game would filter smoothly (for texture filtering), bound on unit 2 as
@@ -736,6 +747,8 @@ int main(int argc, char** argv)
     const int flareX = static_cast<int>((1.0f - projection[0] * 0.3f) * 0.5f * W);
 
     std::vector<unsigned char> rgb(static_cast<size_t>(W) * H * 3);
+    std::vector<unsigned char> rgbOverlay(static_cast<size_t>(W) * H * 3);  // (MXCAM_TEST_OVERLAY_SHOT)
+    bool haveOverlay = false;
     std::vector<unsigned char> rgbBefore(static_cast<size_t>(W) * H * 3);  // tires: the frame before, for flicker
     std::vector<unsigned char> rgbEach(static_cast<size_t>(W) * H * 3);    // tires: every frame, for the mud's coverage
     double tireCover[16] = {};                                                // tires: muddy share of the rear tire, frames 3-11
@@ -968,7 +981,7 @@ int main(int argc, char** argv)
             QueryPerformanceCounter(&nowCount);
             const float elapsed = static_cast<float>(double(nowCount.QuadPart - runStart.QuadPart) / double(frequency.QuadPart));
             const bool wheelsDrawn = !hiddenWheels || elapsed < 1.4f;
-            const float travelled = roostRun ? 0.6f * elapsed + 3.0f * elapsed * elapsed : hiddenWheels ? 5.0f * elapsed : gateBox ? 0.0f : backShadow ? 4.5f : rivalRoost ? 1.0f * elapsed + 1.2f * elapsed * elapsed : bikeDirtTest ? (elapsed < 1.7333f ? 3.0f * elapsed : 5.2f) : rearHidden || wheelDrift || rival ? 3.0f * elapsed : frameIndex * 0.45f;
+            const float travelled = roostRun ? 0.6f * elapsed + 3.0f * elapsed * elapsed : hiddenWheels ? 5.0f * elapsed : gateBox ? 0.0f : backShadow ? 4.5f : rivalRoost ? 1.0f * elapsed + 1.2f * elapsed * elapsed : bikeDirtTest ? (elapsed < 1.7333f ? 6.0f * elapsed - 5.2f : 5.2f) : rearHidden || wheelDrift || rival ? 3.0f * elapsed : frameIndex * 0.45f;
             // First, like a real track: lots of other skinned objects drawn further away (more than
             // the mod used to keep track of in a frame).
             for (int k = 0; k < 100; ++k) {
@@ -1136,6 +1149,32 @@ int main(int argc, char** argv)
                 gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
                 gl.BindVertexArray(arrays[10]);
                 p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                // A grate under your bike, along with it.
+                {
+                    Mul(view, bikeModel, viewModel);
+                    gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
+                    gl.BindVertexArray(arrays[13]);
+                    p_glDrawElements(GL_TRIANGLES, 12, GL_UNSIGNED_SHORT, nullptr);
+                    gl.BindVertexArray(arrays[10]);
+                }
+                // Your bike's frame (its own mesh, drawn once).
+                {
+                    Mul(view, bikeModel, viewModel);
+                    gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
+                    gl.BindVertexArray(arrays[12]);
+                    p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                    gl.BindVertexArray(arrays[10]);
+                }
+                // The same mesh again, lower down and further out (one mesh drawn twice on a bike, as a left and a right
+                // fork leg): both of them yours.
+                {
+                    const float lower[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0.25f * u, -0.3f * u, -0.9f * u, 1 };  // (39 cm from it)
+                    float twinModel[16];
+                    Mul(bikeModel, lower, twinModel);
+                    Mul(view, twinModel, viewModel);
+                    gl.UniformMatrix4fv(bMv, 1, GL_FALSE, viewModel);
+                    p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                }
                 // Once both bikes have stopped: a part of another bike (of another model: a mesh never
                 // on yours) stood against yours, inside your bike's box - 30 cm to its side, 35 to 65 cm
                 // over its axles, over the front half (above your panel). Never dirt on it.
@@ -1506,7 +1545,9 @@ int main(int argc, char** argv)
             p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
             p_glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, rgbBefore.data());
         }
-        if (frameIndex == (hideHud || headShadow || rival || stadiumSwap || roostRun || riderFar || (rearHidden && !gateBox) ? frames - 1 : 11)) {
+        const bool captureFrame =
+            frameIndex == (hideHud || headShadow || rival || stadiumSwap || roostRun || riderFar || (rearHidden && !gateBox) ? frames - 1 : 11);
+        if (captureFrame) {
             p_glFinish();
             p_glReadBuffer(GL_BACK);
             p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -1515,6 +1556,17 @@ int main(int argc, char** argv)
         gl.ActiveTexture(0x84C0);
         p_glDisable(GL_BLEND);
         p_wglSwapBuffers(dc);
+        // MXCAM_TEST_OVERLAY_SHOT: overlay.bmp, the frame as presented, with what the mod draws over
+        // it at the swap (its HUD: the dab indicator, the lap timer). To look at; not for the checks.
+        static const bool overlayShot = getenv("MXCAM_TEST_OVERLAY_SHOT") != nullptr;
+        if (overlayShot && captureFrame) {
+            p_glFinish();
+            p_glReadBuffer(GL_FRONT);
+            p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            p_glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, rgbOverlay.data());
+            p_glReadBuffer(GL_BACK);
+            haveOverlay = true;
+        }
         if (timing) {
             p_glFinish();
             QueryPerformanceCounter(&frameEnd);
@@ -2302,6 +2354,14 @@ int main(int argc, char** argv)
                theirs[2]);
         Check(log.find("bike dirt: on a part of your bike") != std::string::npos, "the log says the bike dirt went on a part of your bike");
         Check(mine[0] - mine[2] > 15.0 && mine[0] < 190.0, "your bike's light grey panel has mud on it (browner and darker)");
+        // (The grate, flat at the ground, is seen edge on: the log says whether it had the dirt - its
+        // mesh is the only one of 12 indices.)
+        Check(log.find("on a part of your bike (program") != std::string::npos && log.find(" 12 indices, its middle") == std::string::npos,
+              "a grate under your bike, along with it, never has the dirt");
+        double twin[3];
+        Average(lastX0 + 1.45f * u, 0.16f * u, -4.1f * u, twin);
+        printf("    the same panel drawn again lower on your bike: %.0f %.0f %.0f\n", twin[0], twin[1], twin[2]);
+        Check(twin[0] - twin[2] > 15.0 && twin[0] < 190.0, "one mesh drawn twice on your bike: both have mud");
         Check(std::fabs(theirs[0] - theirs[2]) < 8.0 && theirs[0] > 180.0, "the other bike's panel, 1 m beside yours, has none");
         // Another bike's part (of another model) stood against yours, inside your bike's box, once
         // yours is learnt: its side towards the camera.
@@ -2575,6 +2635,10 @@ int main(int argc, char** argv)
 
     WriteBmp(dir + L"frame.bmp", rgb, W, H);
     wprintf(L"    frame saved to %sframe.bmp\n", dir.c_str());
+    if (haveOverlay) {
+        WriteBmp(dir + L"overlay.bmp", rgbOverlay, W, H);
+        wprintf(L"    with the overlay: %soverlay.bmp\n", dir.c_str());
+    }
     p_wglMakeCurrent(nullptr, nullptr);
     p_wglDeleteContext(rc);
     printf(g_failures ? "%d check(s) FAILED\n" : "All checks passed\n", g_failures);

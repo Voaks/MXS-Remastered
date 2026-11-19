@@ -40,6 +40,7 @@
 #include "gamepad.h"
 #include "hooks.h"
 #include "log.h"
+#include "laptimer.h"
 #include "logo_png.h"
 #include "mathlib.h"
 #include "overlay.h"
@@ -281,7 +282,7 @@ constexpr int kGlyphTop = kDiscY + kDiscSize + 64;
 
 // kFontTab: the tabs down the left. kFontButton: the buttons. kFontSection: a section's heading.
 // kFontLabel: a setting's name. kFontValue: its value (and the search box). kFontBody: the help.
-enum FontId { kFontTitle, kFontBody, kFontValue, kFontSmall, kFontTab, kFontButton, kFontSection, kFontLabel, kFontCount };
+enum FontId { kFontTitle, kFontBody, kFontValue, kFontSmall, kFontTab, kFontButton, kFontSection, kFontLabel, kFontTimer, kFontCount };
 
 // The logo in the atlas, at the size it's drawn (kLogoHeight at the atlas's scale).
 struct AtlasImage {
@@ -469,6 +470,7 @@ bool BuildAtlas(GLuint texture, float scale)
         { 22, FW_BOLD,     L"Arial" },     // kFontButton
         { 17, FW_BOLD,     L"Arial" },     // kFontSection
         { 18, FW_NORMAL,   L"Arial" },     // kFontLabel
+        { 30, FW_BOLD,     L"Consolas" },  // kFontTimer (the lap timer: every digit as wide, scaled to its panel)
     };
     const int pad = 2;
     int penX = 0, penY = kGlyphTop, rowHeight = 0;
@@ -588,6 +590,7 @@ bool BuildAtlas(GLuint texture, float scale)
         { 22, 700, "Arial" },     // kFontButton
         { 17, 700, "Arial" },     // kFontSection
         { 18, 400, "Arial" },     // kFontLabel
+        { 30, 700, "monospace" }, // kFontTimer
     };
     const int pad = 2;
     int penX = 0, penY = kGlyphTop, rowHeight = 0;
@@ -1648,6 +1651,14 @@ const RowDef kRows[] = {
               "you hold the game's Sit/Dab key. Follows the game's own settings: your Sit/Dab key or "
               "button and Dab When Stopped. Turning it on asks whether the game's Sticky Sit/Dab is on "
               "(turn it off and on again to change your answer)."),
+    Toggle(kTabOther, nullptr,          "Lap timer",                 &Config::lapTimer)
+        .Help("A lap timer, timed by the mod from the track's own timing gates: the lap, the timing gate "
+              "you've passed (G 7/38), this lap's time, and beside it the live gap to your best lap at that "
+              "gate (green ahead, red behind). PACE is the time this lap is heading for (your best plus the "
+              "gap), BEST your best this session. The first lap runs from leaving the start gate. Laps that "
+              "miss a gate don't count as a best (the G turns amber). Move the mouse over it: drag it to "
+              "move it, drag its corner to resize it, and click the pin beside it to pin it where it is "
+              "(click again to unpin)."),
     Toggle(kTabOther, "WINDOW",         "Fullscreen window",         &Config::fullscreenWindow)
         .Help("With the game in windowed mode, makes its window cover the whole screen with no border "
               "(borderless fullscreen): Alt+Tab stays instant. Off puts the window back as it was. "
@@ -2025,6 +2036,8 @@ double Seconds()
 }
 
 std::atomic<bool> g_menuOpen{ false };  // read by the window procedure (the window's thread)
+extern std::atomic<int> g_timerHot[4];  // (the lap timer's, below)
+void SetTimerHot(float x, float y, float w, float h);
 std::atomic<int>  g_wheelDelta{ 0 };    // the mouse wheel while the menu is open (WHEEL_DELTA a notch)
 #ifdef _WIN32
 HWND    g_hookedWindow   = nullptr;
@@ -2055,6 +2068,14 @@ LRESULT CALLBACK PanelWindowProc(HWND window, UINT message, WPARAM wParam, LPARA
             SetCursor(nullptr);
             return TRUE;
         }
+    }
+    // The lap timer: a press on it (unpinned) or its pin goes to it only.
+    if ((message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK) && !g_menuOpen.load(std::memory_order_relaxed) &&
+        g_timerHot[2].load() > 0) {
+        const int x = static_cast<short>(LOWORD(lParam)), y = static_cast<short>(HIWORD(lParam));
+        if (x >= g_timerHot[0].load() && y >= g_timerHot[1].load() && x < g_timerHot[0].load() + g_timerHot[2].load() &&
+            y < g_timerHot[1].load() + g_timerHot[3].load())
+            return 0;
     }
     if (g_menuOpen.load(std::memory_order_relaxed)) {
         if (message == WM_MOUSEWHEEL)
@@ -2116,6 +2137,7 @@ void SubclassWindow(HWND) {}
 
 void OpenPanel(HWND window)
 {
+    SetTimerHot(0, 0, 0, 0);  // (the lap timer: not moved while the menu's open)
     SubclassWindow(window);
     g_panel.open = true;
     g_panel.dragging = -1;
@@ -4587,6 +4609,294 @@ void DabIndicatorFrame(HWND window)
     RestoreState(saved);
 }
 
+// ---- The lap timer (Config::lapTimer, laptimer.h) ---------------------------------------------
+// Its panel, in the menu's own look (a dark card, a red edge down its left):
+//     LAP 3                  G 7/38      the lap; the timing gate passed, of the lap's
+//     1:02.34               [-0.54]      this lap so far; the live gap to your best at that gate
+//     PACE 1:01.80     BEST 1:01.26      where this lap is heading (best + gap); your best
+// Move the mouse over it (the menu closed): unpinned, drag it to move it, drag its bottom right corner
+// to resize it; the pin beside its top right corner pins it (and unpins it).
+LapTimerPlace g_timerPlace;
+bool          g_timerPlaceLoaded = false;
+struct TimerDrag {
+    bool  dragging = false, resizing = false;
+    float grabX = 0, grabY = 0, grabFromLeft = 1, startSize = 1;
+};
+TimerDrag g_timerDrag;
+KeyState  g_timerMouse;
+
+struct TimerLayout {
+    float x = 0, y = 0, w = 0, h = 0;  // the card
+    float u = 1;                       // a unit: a pixel at the usual size on a 1080 screen
+    float pinX = 0, pinY = 0, pin = 0; // the pin's button, beside its top right corner
+};
+
+TimerLayout LayOutTimer(int width, int height)
+{
+    TimerLayout l;
+    const float ui = Clamp(height / 1080.0f, 0.6f, 2.0f);
+    l.u = ui * static_cast<float>(g_timerPlace.size);
+    l.w = std::round(236.0f * l.u);
+    l.h = std::round(82.0f * l.u);
+    l.pin = std::round(std::fmax(14.0f * ui, 20.0f * l.u));
+    // Kept on the screen (its pin too).
+    const float maxX = std::fmax(0.0f, width - l.w - l.pin - 4.0f * ui), maxY = std::fmax(0.0f, height - l.h);
+    l.x = std::round(Clamp(static_cast<float>(g_timerPlace.x) * width, 0.0f, maxX));
+    l.y = std::round(Clamp(static_cast<float>(g_timerPlace.y) * height, 0.0f, maxY));
+    l.pinX = l.x + l.w + std::round(4.0f * ui);
+    l.pinY = l.y;
+    return l;
+}
+
+// Text drawn k times its size in the atlas (the panel is resized freely; the font isn't rebuilt).
+void TextScaled(FontId font, float x, float y, const char* text, uint32_t color, float k)
+{
+    float pen = x;
+    y = std::round(y);
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
+        const Glyph& g = g_fonts[font].glyphs[*p];
+        if (g.valid && *p != ' ') {
+            const float gx = std::round(pen + g.bearing * k);
+            Quad(gx, y, gx + g.width * k, y + g.height * k, g.u0, g.v0, g.u1, g.v1, color);
+        }
+        pen += g.advance * k;
+    }
+}
+
+// A time as m:ss.cc (hundredths, cut not rounded, as a lap timer counts), or blanks.
+void FormatLapTime(double seconds, char* out, size_t size)
+{
+    if (seconds < 0) {
+        snprintf(out, size, "-:--.--");
+        return;
+    }
+    const long long cs = static_cast<long long>(std::floor(seconds * 100.0 + 1e-6));
+    snprintf(out, size, "%lld:%02lld.%02lld", cs / 6000, (cs / 100) % 60, cs % 100);
+}
+
+// The pin: upright when pinned, leaning over when not.
+void PinIcon(float x, float y, float b, bool pinned, uint32_t color)
+{
+    const float cx = x + 0.5f * b, cy = y + 0.5f * b;
+    const float lean = pinned ? 0.0f : 0.7854f;
+    const float c = std::cos(lean), s = std::sin(lean);
+    const auto P = [&](float u, float v, float& px, float& py) {  // (u across, v down the pin, about its middle)
+        px = cx + u * c - v * s;
+        py = cy + u * s + v * c;
+    };
+    float ax, ay, bx, by;
+    P(0, -0.12f * b, ax, ay);
+    P(0, 0.36f * b, bx, by);
+    Segment(ax, ay, bx, by, std::fmax(1.5f, 0.09f * b), color);  // the needle
+    P(-0.2f * b, -0.08f * b, ax, ay);
+    P(0.2f * b, -0.08f * b, bx, by);
+    Segment(ax, ay, bx, by, std::fmax(2.0f, 0.13f * b), color);  // its collar
+    P(0, -0.24f * b, ax, ay);
+    Disc(ax, ay, 0.17f * b, color);                                // its head
+}
+
+// Where clicks go to the panel and not the game (read by the window procedure; 0 wide: none).
+std::atomic<int> g_timerHot[4] = { 0, 0, 0, 0 };
+
+void SetTimerHot(float x, float y, float w, float h)
+{
+    g_timerHot[0] = static_cast<int>(x);
+    g_timerHot[1] = static_cast<int>(y);
+    g_timerHot[2] = static_cast<int>(w);
+    g_timerHot[3] = static_cast<int>(h);
+}
+
+// Each frame (menu open or not): your bike's place to the timer.
+void LapTimerUpdate(double now)
+{
+    if (!GetConfig().lapTimer)
+        return;
+    double position[3] = {};
+    const bool have = SceneOnScreen() && postfx::OwnPosition(position);
+    laptimer::Update(now, have, position);
+}
+
+// Draws the lap timer over this frame (the menu closed), and moves it as it's dragged.
+void LapTimerFrame(HWND window, double now)
+{
+    if (!GetConfig().lapTimer || !SceneOnScreen() || GameMenuOverScene()) {
+        SetTimerHot(0, 0, 0, 0);
+        g_timerDrag = TimerDrag{};
+        return;
+    }
+    RECT client;
+    if (!GetClientRect(window, &client) || client.right <= 0 || client.bottom <= 0)
+        return;
+    const int width = client.right, height = client.bottom;
+    const float scale = std::round(Clamp(std::fmin(height / 1080.0f, width / 1440.0f), 0.6f, 2.0f) * 20.0f) / 20.0f;  // (as the menu's)
+    if (!g_timerPlaceLoaded) {
+        g_timerPlace = ReadLapTimerPlace();
+        g_timerPlaceLoaded = true;
+    }
+    SubclassWindow(window);  // (clicks on it kept from the game)
+    SavedState saved;
+    SaveState(saved);
+    if (!EnsureResources(scale)) {
+        RestoreState(saved);
+        return;
+    }
+    // The mouse: dragging, resizing, the pin.
+    TimerLayout l = LayOutTimer(width, height);
+    float mx = -1, my = -1;
+    const bool cursor = GameHasFocus() && GameCursorPos(mx, my) && mx >= 0 && my >= 0 && mx < width && my < height;
+    const bool wasDown = g_timerMouse.down;
+    PollKey(g_timerMouse, VK_LBUTTON, false, now);
+    const bool down = g_timerMouse.down, pressed = down && !wasDown, released = !down && wasDown;
+    const auto Inside = [&](float x, float y, float w, float h) { return cursor && mx >= x && mx < x + w && my >= y && my < y + h; };
+    const float grip = std::round(0.8f * l.pin);
+    const bool onPin = Inside(l.pinX, l.pinY, l.pin, l.pin);
+    const bool onPanel = Inside(l.x, l.y, l.w, l.h);
+    const bool onGrip = Inside(l.x + l.w - grip, l.y + l.h - grip, grip, grip);
+    if (pressed && onPin) {
+        g_timerPlace.pinned = !g_timerPlace.pinned;
+        WriteLapTimerPlace(g_timerPlace);
+        Log("lap timer: %s", g_timerPlace.pinned ? "pinned" : "unpinned");
+    } else if (pressed && !g_timerPlace.pinned && onGrip) {
+        g_timerDrag.resizing = true;
+        g_timerDrag.grabFromLeft = std::fmax(8.0f, mx - l.x);
+        g_timerDrag.startSize = static_cast<float>(g_timerPlace.size);
+    } else if (pressed && !g_timerPlace.pinned && onPanel) {
+        g_timerDrag.dragging = true;
+        g_timerDrag.grabX = mx - l.x;
+        g_timerDrag.grabY = my - l.y;
+    }
+    if (down && cursor && g_timerDrag.dragging) {
+        g_timerPlace.x = Clamp((mx - g_timerDrag.grabX) / width, 0.0f, 1.0f);
+        g_timerPlace.y = Clamp((my - g_timerDrag.grabY) / height, 0.0f, 1.0f);
+    } else if (down && cursor && g_timerDrag.resizing) {
+        // (From its top left, which stays put: the corner follows the mouse across.)
+        g_timerPlace.size = Clamp(g_timerDrag.startSize * std::fmax(8.0f, mx - l.x) / g_timerDrag.grabFromLeft, 0.4f, 4.0f);
+    }
+    if (released || !down) {
+        if (g_timerDrag.dragging || g_timerDrag.resizing)
+            WriteLapTimerPlace(g_timerPlace);
+        g_timerDrag = TimerDrag{};
+    }
+    l = LayOutTimer(width, height);
+    const bool busy = g_timerDrag.dragging || g_timerDrag.resizing;
+    const bool hover = busy || Inside(l.x, l.y, l.w, l.h) || Inside(l.pinX, l.pinY, l.pin, l.pin);
+    // Clicks kept from the game: on the panel while it can be moved, on its pin always (while shown).
+    if (g_timerPlace.pinned)
+        SetTimerHot(l.pinX, l.pinY, hover ? l.pin : 0, l.pin);
+    else
+        SetTimerHot(l.x, l.y, l.pinX + l.pin - l.x, l.h);
+
+    // What it says.
+    const laptimer::Display d = laptimer::Current(now);
+    char lapNumber[8], cur[16], pace[16], best[16], gate[16], gap[16];
+    if (d.lap > 0)
+        snprintf(lapNumber, sizeof lapNumber, "%d", d.lap);
+    else
+        snprintf(lapNumber, sizeof lapNumber, "-");
+    FormatLapTime(d.current, cur, sizeof cur);
+    FormatLapTime(d.predicted, pace, sizeof pace);
+    FormatLapTime(d.best, best, sizeof best);
+    if (d.lap > 0 && d.gates > 0)
+        snprintf(gate, sizeof gate, "%d/%d", d.split, d.gates);
+    else
+        snprintf(gate, sizeof gate, "-");
+    if (d.haveGap)
+        snprintf(gap, sizeof gap, "%+.2f", d.gap);
+    else
+        snprintf(gap, sizeof gap, "--.--");
+
+    g_batch.clear();
+    g_keepRanges.clear();
+    g_clips.clear();
+    const float u = l.u;
+    const auto U = [u](float v) { return std::round(v * u); };
+    const uint32_t text = Rgba(236, 236, 240, 1.0f);
+    const uint32_t label = Rgba(140, 142, 150, 1.0f);
+    const uint32_t blank = Rgba(110, 112, 120, 1.0f);
+    // (Text by the height of its line, in pixels; its width likewise.)
+    const auto Draw = [](FontId font, float x, float top, const char* str, uint32_t color, float px) {
+        const float k = g_fonts[font].lineHeight > 0 ? px / g_fonts[font].lineHeight : 1.0f;
+        TextScaled(font, x, top, str, color, k);
+    };
+    const auto Wide = [](FontId font, const char* str, float px) {
+        const float k = g_fonts[font].lineHeight > 0 ? px / g_fonts[font].lineHeight : 1.0f;
+        return TextWidth(font, str, 0) * k;
+    };
+    // The card, and its red edge.
+    RoundedRect(l.x, l.y, l.w, l.h, U(6), Rgba(12, 13, 17, 0.80f));
+    RoundedRect(l.x, l.y, U(4), l.h, U(2), kAccent);
+    if (hover && !g_timerPlace.pinned) {
+        // Movable: an outline, and the resizing corner's lines.
+        const float t = std::fmax(1.0f, std::round(scale));
+        const uint32_t edge = Rgba(255, 255, 255, 0.30f);
+        Rect(l.x, l.y, l.w, t, edge);
+        Rect(l.x, l.y + l.h - t, l.w, t, edge);
+        Rect(l.x, l.y, t, l.h, edge);
+        Rect(l.x + l.w - t, l.y, t, l.h, edge);
+        const float gx = l.x + l.w, gy = l.y + l.h;
+        for (int i = 1; i <= 3; ++i) {
+            const float o = grip * (0.28f * i);
+            Segment(gx - o, gy - std::round(2 * t), gx - std::round(2 * t), gy - o, std::fmax(1.2f, t), Rgba(255, 255, 255, 0.5f));
+        }
+    }
+    const float left = l.x + U(16), right = l.x + l.w - U(12);
+    const float smallPx = U(14), bigPx = U(32), tagPx = U(19);
+    // Row 1: LAP 3 ... G 7/38 (the G red; amber when this lap missed one).
+    const float row1 = l.y + U(8);
+    Draw(kFontSection, left, row1, "LAP", label, smallPx);
+    Draw(kFontSection, left + Wide(kFontSection, "LAP ", smallPx), row1, lapNumber, d.lap > 0 ? text : blank, smallPx);
+    {
+        const float gw = Wide(kFontSection, gate, smallPx), gx = right - gw;
+        const uint32_t gColor = d.lap > 0 && !d.valid ? Rgba(255, 176, 64, 1.0f) : kAccentHot;
+        Draw(kFontSection, gx - Wide(kFontSection, "G ", smallPx), row1, "G", gColor, smallPx);
+        Draw(kFontSection, gx, row1, gate, d.lap > 0 ? text : blank, smallPx);
+    }
+    // Row 2: this lap's time, bigPx (gold for a moment when one ends; grey if it missed a gate), and
+    // the live gap in a tagPx (green ahead, red behind).
+    const float row2 = l.y + U(25);
+    uint32_t curColor = d.current < 0 ? blank : text;
+    if (d.finished)
+        curColor = d.valid ? Rgba(255, 210, 90, 1.0f) : label;
+    else if (!d.valid)
+        curColor = label;
+    Draw(kFontTimer, left, row2, cur, curColor, bigPx);
+    {
+        const float tw = Wide(kFontTimer, gap, tagPx), pad = U(7);
+        const float bw = tw + 2 * pad, bh = std::round(tagPx * 1.15f);
+        const float bx = right - bw, by = std::round(row2 + (bigPx - bh) * 0.5f);
+        uint32_t back = Rgba(255, 255, 255, 0.07f), fore = blank;
+        if (d.haveGap && d.gap < 0) {
+            back = Rgba(60, 200, 110, 0.22f);
+            fore = Rgba(110, 230, 150, 1.0f);
+        } else if (d.haveGap && d.gap > 0) {
+            back = Rgba(230, 60, 60, 0.22f);
+            fore = Rgba(250, 120, 120, 1.0f);
+        } else if (d.haveGap) {
+            fore = text;
+        }
+        RoundedRect(bx, by, bw, bh, U(4), back);
+        Draw(kFontTimer, bx + pad, std::round(by + (bh - tagPx) * 0.5f), gap, fore, tagPx);
+    }
+    // Row 3: PACE 1:01.80 ... BEST 1:01.26.
+    const float row3 = l.y + U(62);
+    Draw(kFontSection, left, row3, "PACE", label, smallPx);
+    Draw(kFontTimer, left + Wide(kFontSection, "PACE ", smallPx) + U(3), row3, pace, d.predicted < 0 ? blank : text, smallPx);
+    {
+        const float bw = Wide(kFontTimer, best, smallPx), bx = right - bw;
+        Draw(kFontSection, bx - Wide(kFontSection, "BEST ", smallPx) - U(3), row3, "BEST", label, smallPx);
+        Draw(kFontTimer, bx, row3, best, d.best < 0 ? blank : text, smallPx);
+    }
+    // The pin, while the mouse is over it (or it's being dragged).
+    if (hover) {
+        RoundedRect(l.pinX, l.pinY, l.pin, l.pin, std::round(0.2f * l.pin), Rgba(10, 12, 16, 0.72f));
+        const bool pinHot = Inside(l.pinX, l.pinY, l.pin, l.pin);
+        const uint32_t pinColor = g_timerPlace.pinned ? Rgba(255, 196, 64, 1.0f) : (pinHot ? Rgba(255, 255, 255, 1.0f) : Rgba(200, 202, 210, 1.0f));
+        PinIcon(l.pinX, l.pinY, l.pin, g_timerPlace.pinned, pinColor);
+    }
+    DrawBatch(width, height);
+    RestoreState(saved);
+}
+
 }  // namespace
 
 bool OverlayListeningForKey()
@@ -4653,6 +4963,7 @@ void OverlayFrame(HDC dc)
     g_gameWindow = window;
     NoteMouseActivity();
     setups::Update(window, now);  // (a setup being loaded or saved: its command typed along)
+    LapTimerUpdate(now);           // (timed with the menu open too)
     UpdateFullscreenWindow(window, cfg.fullscreenWindow);
     UpdateSoundPacks(now);
     // The game's cursor while riding (Config::hideCursor): if it's the system's, the window
@@ -4744,6 +5055,7 @@ void OverlayFrame(HDC dc)
             g_openNotes = true;
         if (!((menuKey && focus) || testOpen || g_openNotes)) {
             DabIndicatorFrame(window);
+            LapTimerFrame(window, now);
             StartupHintFrame(window, now);  // (which key opens the menu, for a few seconds after the start)
             return;
         }

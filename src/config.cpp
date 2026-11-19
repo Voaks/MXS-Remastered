@@ -407,6 +407,7 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Other",     L"HideHud",              c.hideHud ? 1.0 : 0.0 },
         { L"Other",     L"HideCursor",           c.hideCursor ? 1.0 : 0.0 },
         { L"Other",     L"DabIndicator",         c.dabIndicator ? 1.0 : 0.0 },
+        { L"Other",     L"LapTimer",             c.lapTimer ? 1.0 : 0.0 },
         { L"Other",     L"BrakeSqueal",          c.brakeSqueal },
         { L"Other",     L"DirtSlide",            c.dirtSlide },
         { L"Other",     L"DabSticky",            static_cast<double>(c.dabSticky) },
@@ -624,6 +625,7 @@ void CopyTunables(const Config& from, Config& to)
     to.hideHud              = from.hideHud;
     to.hideCursor           = from.hideCursor;
     to.dabIndicator         = from.dabIndicator;
+    to.lapTimer             = from.lapTimer;
     to.brakeSqueal          = from.brakeSqueal;
     to.dirtSlide            = from.dirtSlide;
     to.dabSticky            = from.dabSticky;
@@ -743,6 +745,34 @@ void WriteMenuSize(double size)
     wchar_t text[32];
     swprintf_s(text, L"%.3f", size);
     WritePrivateProfileStringW(L"Other", L"MenuSize", text, g_path);  // (one key: quick)
+}
+
+LapTimerPlace ReadLapTimerPlace()
+{
+    LapTimerPlace place;
+    if (!g_path[0])
+        return place;
+    wchar_t buffer[96] = L"";
+    GetPrivateProfileStringW(L"Other", L"LapTimerPlace", L"", buffer, 96, g_path);
+    double x = 0, y = 0, size = 0;
+    int pinned = 0;
+    if (swscanf_s(buffer, L"%lf,%lf,%lf,%d", &x, &y, &size, &pinned) == 4 && std::isfinite(x) && std::isfinite(y) &&
+        std::isfinite(size)) {
+        place.x = Clamp(x, 0.0, 1.0);
+        place.y = Clamp(y, 0.0, 1.0);
+        place.size = Clamp(size, 0.4, 4.0);
+        place.pinned = pinned != 0;
+    }
+    return place;
+}
+
+void WriteLapTimerPlace(const LapTimerPlace& place)
+{
+    if (!g_path[0])
+        return;
+    wchar_t text[96];
+    swprintf_s(text, L"%.4f,%.4f,%.3f,%d", place.x, place.y, place.size, place.pinned ? 1 : 0);
+    WritePrivateProfileStringW(L"Other", L"LapTimerPlace", text, g_path);
 }
 
 namespace {
@@ -940,6 +970,7 @@ Config ParseConfig(const Config& base)
     c.hideHud          = ReadInt(L"Other", L"HideHud", c.hideHud) != 0;
     c.hideCursor       = ReadInt(L"Other", L"HideCursor", c.hideCursor) != 0;
     c.dabIndicator     = ReadInt(L"Other", L"DabIndicator", c.dabIndicator) != 0;
+    c.lapTimer         = ReadInt(L"Other", L"LapTimer", c.lapTimer) != 0;
     c.brakeSqueal      = Clamp(ReadDouble(L"Other", L"BrakeSqueal", c.brakeSqueal), 0.0, 1.0);
     c.dirtSlide        = Clamp(ReadDouble(L"Other", L"DirtSlide", c.dirtSlide), 0.0, 1.0);
     c.dabSticky        = Clamp(ReadInt(L"Other", L"DabSticky", c.dabSticky), 0, 2);
