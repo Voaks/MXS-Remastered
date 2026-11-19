@@ -1182,12 +1182,33 @@ void main()
     // depth says whatever is behind it - the ground, a hill, a fence - and every effect that goes by
     // depth (the dirt detail, ruts, wet and snow, shadows, AO, haze) went onto it: what's behind seen
     // through the tree. What changed in colour since the first see-through draw, its depth as it was.
+    // But not what lies flat on the ground itself (a track's decals: painted lines, ruts and patches,
+    // the dark under a tuff block - drawn without depth too, the stadiums' floors covered in them): where
+    // its draw was repeated into a depth of ours (u_ownDepth) and that's the ground's own, within 15 cm
+    // or 1% of the way, it's the ground's look and gets the ground's effects. (Taken for "seen through",
+    // a stadium's floor lost its shadows, AO and detail everywhere but right around you.)
     bool overGround = false;
     if (!sky && !overSky && u_seeShotOn > 0.5 && abs(d - textureLod(u_seeDepth, v_uv, 0.0).r) < 1e-7) {
         vec3 drawn = texture(u_color, v_uv).rgb, shot = textureLod(u_seeShot, v_uv, 0.0).rgb;
-        overGround = any(greaterThan(abs(drawn - shot), vec3(1.5 / 255.0)));
+        // (By more than a nudge: a stadium lays a faint overlay over its whole floor and stands, drawn
+        // without depth, floating above the dirt in places - it moved the floor's colour a few steps and
+        // took everything past ~15 m for "seen through": no shadows there. A tree's leaves change it a lot.)
+        overGround = any(greaterThan(abs(drawn - shot), vec3(8.5 / 255.0)));
+        // Only what's known to stand in front: where no see-through draw's own depth was drawn (one that
+        // couldn't be drawn again), it's taken for the ground's own look.
+        if (overGround && u_ownDepthOn > 0.5) {
+            float od = textureLod(u_ownDepth, v_uv, 0.0).r;
+            if (od >= 1.0) {
+                overGround = false;
+            } else {
+                float zBehind = -ViewPos(v_uv, min(d, 0.99999)).z, zOwn = -ViewPos(v_uv, od).z;
+                if (zBehind - zOwn < max(0.15 * u_metre, 0.01 * zBehind))
+                    overGround = false;
+            }
+        }
     }
 
+)GLSL" R"GLSL(
     // In uniform control flow, for the detail texture's mip selection.
     vec3 p = ViewPos(v_uv, min(d, 0.99999));
     vec3 wp = u_camWrapped + u_viewToWorld * p;

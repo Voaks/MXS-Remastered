@@ -104,7 +104,7 @@ PFN_eglGetProcAddress            real_eglGetProcAddress      = nullptr;
 // Mirrored GL state
 // ===========================================================================
 constexpr int kStackDepth   = 64;    // >= any driver's modelview / projection stack depth
-constexpr int kMaxDumpLines = 4000;  // per frame dump
+constexpr int kMaxDumpLines = 40000;  // per frame dump (a stadium's frame: ~25000 lines)
 
 struct MatrixState {
     GLenum mode     = GL_MODELVIEW;

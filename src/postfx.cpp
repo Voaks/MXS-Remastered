@@ -6417,6 +6417,109 @@ void DumpAo(int w, int h, bool lightOn)
     g_gl.BindFramebuffer(kReadFramebuffer, g_res.captureFbo);
     g_gl.ReadPixels(w / 2, 0, 1, h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, depth.data());
     const GLenum error = g_gl.GetError();
+    // (And what tells see-through from the ground there: the depth and colour at the see-through
+    // snapshot, the see-through draws' own depth, and the colour now.)
+    std::vector<GLuint> seeDepth(static_cast<size_t>(h), 0), ownDepth(static_cast<size_t>(h), 0);
+    std::vector<unsigned char> colourNow(static_cast<size_t>(h) * 4, 0), colourShot(static_cast<size_t>(h) * 4, 0);
+    g_gl.ReadPixels(w / 2, 0, 1, h, GL_RGBA, GL_UNSIGNED_BYTE, colourNow.data());
+    if (g_frame.seeShot) {
+        g_gl.BindFramebuffer(kReadFramebuffer, g_res.seeFbo);
+        g_gl.ReadPixels(w / 2, 0, 1, h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, seeDepth.data());
+        g_gl.BindFramebuffer(kReadFramebuffer, g_res.seeShotFbo);
+        g_gl.ReadPixels(w / 2, 0, 1, h, GL_RGBA, GL_UNSIGNED_BYTE, colourShot.data());
+    }
+    if (g_frame.ownDepth) {
+        g_gl.BindFramebuffer(kReadFramebuffer, g_res.ownFbo);
+        g_gl.ReadPixels(w / 2, 0, 1, h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, ownDepth.data());
+    }
+    g_gl.GetError();
+    // MXS_REMASTERED_seethrough.bmp: the whole picture as the composite tells see-through from the rest
+    // (postfx_shaders.h overGround). Grey: the picture at the snapshot, dimmed; red: its colour changed
+    // since the snapshot at the same depth (drawn over without depth); yellow: and something was
+    // measured standing in front there (overGround: no shadows, AO or detail); blue: changed, but its
+    // own depth is the ground's (kept as ground); black: sky / no snapshot.
+    if (g_frame.seeShot) {
+        const size_t n = static_cast<size_t>(w) * h;
+        std::vector<unsigned char> nowRgba(n * 4), shotRgba(n * 4);
+        std::vector<GLuint> dNow(n), dShot(n), dOwn(n, 0xFFFFFFFFu);
+        g_gl.BindFramebuffer(kReadFramebuffer, g_res.captureFbo);
+        g_gl.ReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, nowRgba.data());
+        g_gl.ReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, dNow.data());
+        g_gl.BindFramebuffer(kReadFramebuffer, g_res.seeShotFbo);
+        g_gl.ReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, shotRgba.data());
+        g_gl.BindFramebuffer(kReadFramebuffer, g_res.seeFbo);
+        g_gl.ReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, dShot.data());
+        if (g_frame.ownDepth) {
+            g_gl.BindFramebuffer(kReadFramebuffer, g_res.ownFbo);
+            g_gl.ReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, dOwn.data());
+        }
+        g_gl.GetError();
+        const double p10 = g_m.proj[10], p14 = g_m.proj[14];
+        const auto Z = [&](GLuint raw) {  // eye distance (game units) from a 24-bit depth in the top bits
+            const double d = std::fmin(static_cast<double>(raw >> 8) / 16777215.0, 0.99999);
+            return p14 / (2.0 * d - 1.0 + p10);
+        };
+        const int ow = (w + 1) / 2, oh = (h + 1) / 2, stride = (ow * 3 + 3) & ~3;
+        std::vector<unsigned char> img(static_cast<size_t>(stride) * oh, 0);
+        long long counts[4] = {}, diffs[5][2] = {};  // (colour changes at the same depth: 2-4, 5-8, 9-16, 17-32, 33+; lower / upper half)
+        for (int y = 0; y < oh; ++y)
+            for (int x = 0; x < ow; ++x) {
+                const size_t i = static_cast<size_t>(y * 2) * w + static_cast<size_t>(x * 2);
+                unsigned char* px = &img[static_cast<size_t>(y) * stride + x * 3];  // (BGR)
+                const double d = static_cast<double>(dNow[i] >> 8) / 16777215.0;
+                if (d >= 0.999999)
+                    continue;  // sky
+                int diff = 0;
+                for (int k = 0; k < 3; ++k)
+                    diff = std::max(diff, std::abs(static_cast<int>(nowRgba[i * 4 + k]) - static_cast<int>(shotRgba[i * 4 + k])));
+                const bool sameDepth = std::llabs(static_cast<long long>(dNow[i] >> 8) - static_cast<long long>(dShot[i] >> 8)) <= 1;
+                const unsigned char grey = static_cast<unsigned char>(shotRgba[i * 4 + 1] / 3);
+                if (sameDepth && diff >= 2)
+                    ++diffs[diff <= 4 ? 0 : diff <= 8 ? 1 : diff <= 16 ? 2 : diff <= 32 ? 3 : 4][y < oh / 2 ? 0 : 1];
+                if (!sameDepth || diff < 9) {
+                    px[0] = px[1] = px[2] = grey;
+                    ++counts[0];
+                    continue;
+                }
+                bool front = true;
+                if (g_frame.ownDepth) {
+                    if ((dOwn[i] >> 8) >= 16777215u) {
+                        front = false;
+                    } else {
+                        const double zB = -Z(dNow[i]), zO = -Z(dOwn[i]);
+                        front = !(std::fabs(zB) - std::fabs(zO) < std::fmax(0.15 * g_unitsPerMetre, 0.01 * std::fabs(zB)));
+                    }
+                }
+                if (front) {
+                    px[0] = 0; px[1] = 230; px[2] = 255;
+                    ++counts[1];
+                } else {
+                    px[0] = 255; px[1] = 90; px[2] = 0;
+                    ++counts[2];
+                }
+            }
+        wchar_t maskPath[1024];
+        swprintf_s(maskPath, L"%sMXS_REMASTERED_seethrough.bmp", LogDirectory());
+        if (FILE* out = _wfsopen(maskPath, L"wb", _SH_DENYWR)) {
+            unsigned char header[54] = { 'B', 'M' };
+            const auto Put = [&](int at, uint32_t v) { for (int k = 0; k < 4; ++k) header[at + k] = static_cast<unsigned char>(v >> (8 * k)); };
+            Put(2, static_cast<uint32_t>(54 + img.size()));
+            Put(10, 54);
+            Put(14, 40);
+            Put(18, static_cast<uint32_t>(ow));
+            Put(22, static_cast<uint32_t>(oh));
+            header[26] = 1;
+            header[28] = 24;
+            Put(34, static_cast<uint32_t>(img.size()));
+            fwrite(header, 1, 54, out);
+            fwrite(img.data(), 1, img.size(), out);
+            fclose(out);
+        }
+        Log("postfx: wrote MXS_REMASTERED_seethrough.bmp: %lld pixels as drawn, %lld taken for see-through (yellow), %lld kept as "
+            "ground (blue); changed by 2-4 / 5-8 / 9-16 / 17-32 / 33+ steps: lower half %lld / %lld / %lld / %lld / %lld, "
+            "upper half %lld / %lld / %lld / %lld / %lld", counts[0], counts[1], counts[2], diffs[0][0], diffs[1][0], diffs[2][0],
+            diffs[3][0], diffs[4][0], diffs[0][1], diffs[1][1], diffs[2][1], diffs[3][1], diffs[4][1]);
+    }
     g_gl.PixelStorei(GL_PACK_ALIGNMENT, 4);
     g_gl.BindFramebuffer(kReadFramebuffer, static_cast<GLuint>(readFbo));
     g_gl.BindBuffer(kPixelPackBuffer, static_cast<GLuint>(packBuffer));
@@ -6466,13 +6569,18 @@ void DumpAo(int w, int h, bool lightOn)
             lightOn ? "on" : "off", error == GL_NO_ERROR ? "ok" : "FAILED");
     fprintf(out, "projection: near %.5f far %.2f (game units; %.3f a metre), fov %.2f deg vertical\n", p14 / (p10 - 1.0),
             p14 / (p10 + 1.0), g_unitsPerMetre, 2.0 * std::atan(1.0 / std::fmax(std::fabs(static_cast<double>(g_m.proj[5])), 1e-6)) * 57.29578);
-    fprintf(out, "row (0 = bottom), depth (24-bit), step from the row below, AO (0-255) at the middle column\n");
+    fprintf(out, "see-through snapshot %s, own depth %s\n", g_frame.seeShot ? "taken" : "not taken", g_frame.ownDepth ? "drawn" : "not drawn");
+    fprintf(out, "row (0 = bottom), depth (24-bit), step from the row below, AO (0-255) at the middle column, depth at the "
+                 "see-through snapshot, see-through's own depth, colour now r g b, colour at the snapshot r g b\n");
     for (int y = 0; y < h; ++y) {
-        const long long d = depth[static_cast<size_t>(y)] >> 8;
-        const long long below = y > 0 ? static_cast<long long>(depth[static_cast<size_t>(y - 1)] >> 8) : d;
+        const size_t i = static_cast<size_t>(y);
+        const long long d = depth[i] >> 8;
+        const long long below = y > 0 ? static_cast<long long>(depth[i - 1] >> 8) : d;
         const int ly = std::min(lh - 1, y * lh / std::max(h, 1));
         const int ao = light[(static_cast<size_t>(ly) * lw + lw / 2) * 2];
-        fprintf(out, "%d,%lld,%lld,%d\n", y, d, d - below, ao);
+        fprintf(out, "%d,%lld,%lld,%d,%lld,%lld,%d %d %d,%d %d %d\n", y, d, d - below, ao, static_cast<long long>(seeDepth[i] >> 8),
+                static_cast<long long>(ownDepth[i] >> 8), colourNow[i * 4], colourNow[i * 4 + 1], colourNow[i * 4 + 2],
+                colourShot[i * 4], colourShot[i * 4 + 1], colourShot[i * 4 + 2]);
     }
     fclose(out);
     Log("postfx: wrote MXS_REMASTERED_ao.bmp and MXS_REMASTERED_ao.txt (window %ldx%ld, effects %dx%d, AO %s)", client.right,
@@ -8114,10 +8222,11 @@ bool WantsSeeThroughDepth()
     static const bool off = GetEnvironmentVariableA("MXCAM_TEST_NO_OWNDEPTH", nullptr, 0) > 0;  // (tests: the old way)
     if (off || !g_frame.seeShot || g_frame.applied || !cfg.shaders || g_res.failed || !g_res.ownOk)
         return false;
-    // Only with something to haze them by: weather's fog, or a time of day's haze (none by day).
-    if (g_frame.ownWanted < 0)
-        g_frame.ownWanted = cfg.weather != kWeatherNone || (cfg.timeOfDay >= 0.0 && CurrentSky().haze > 0.001) ? 1 : 0;
-    return g_frame.ownWanted > 0;
+    // Always (with the snapshot): it hazes them by their own distance in weather and at dusk, and it's
+    // what tells a decal lying on the ground from a tree standing in front of it. (By day without
+    // weather it once wasn't made, and a stadium floor's decals took the ground under them for "seen
+    // through": no shadows there.)
+    return true;
 }
 
 bool BeginSeeThroughDepth()
@@ -8150,11 +8259,15 @@ bool BeginSeeThroughDepth()
     g_gl.Disable(GL_STENCIL_TEST);
     g_gl.Disable(GL_CULL_FACE);  // (both faces: leaves are two-sided)
     g_gl.Disable(GL_POLYGON_OFFSET_FILL);
-    GLfloat clearDepth = 1.0f;
-    g_gl.GetFloatv(GL_DEPTH_CLEAR_VALUE, &clearDepth);
-    g_gl.ClearDepth(1.0);
-    g_gl.Clear(GL_DEPTH_BUFFER_BIT);
-    g_gl.ClearDepth(clearDepth);
+    // (Cleared at the frame's first: streamed draws are drawn in several goes as the frame goes on,
+    // each before the game writes their buffers again.)
+    if (!g_frame.ownDepth) {
+        GLfloat clearDepth = 1.0f;
+        g_gl.GetFloatv(GL_DEPTH_CLEAR_VALUE, &clearDepth);
+        g_gl.ClearDepth(1.0);
+        g_gl.Clear(GL_DEPTH_BUFFER_BIT);
+        g_gl.ClearDepth(clearDepth);
+    }
     g_frame.ownDepth = true;
     static bool logged = false;
     if (!logged) {

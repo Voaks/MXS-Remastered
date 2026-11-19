@@ -238,6 +238,7 @@ int g_loggedBigCasters = 0;  // objects left out of the shadow map logged (this 
 bool g_stadiumTrack = false;  // this track has drawn something far bigger than a track's props
                               // (a stadium's roof or stands): things all overhead are left out too
 std::unordered_map<GLuint, BufferUpdates> g_bufferUpdates;          // buffers rewritten while running
+void BeforeVertexArrayChange();  // (see g_seeThroughPending)
 
 struct DeferredCaster {
     GLuint   program = 0, vao = 0, elementBuffer = 0;
@@ -1952,6 +1953,8 @@ void APIENTRY Wrap_glBindVertexArray(GLuint array)
 void APIENTRY Wrap_glBindBuffer(GLenum target, GLuint buffer)
 {
     if (target == kElementArrayBuffer) {
+        if (g_elementBuffers[g_vao] != buffer)
+            BeforeVertexArrayChange();
         GLuint& was = g_elementBuffers[g_vao];
         if (was != buffer)
             g_vaoChangedFrame[g_vao] = g_frameNumber;
@@ -2292,6 +2295,33 @@ void NoteBufferContents(GLenum target)
         ++g_bufferGeneration[buffer];
 }
 
+bool Streamed(GLuint buffer);
+// The buffers held-back see-through draws of streamed geometry read from (KeepSeeThrough): before the
+// game writes one of them afresh, those draws are drawn for their depth (FlushSeeThroughDepth) while
+// their geometry is still there.
+std::vector<GLuint> g_seeThroughPending;
+std::vector<GLuint> g_seeThroughPendingArrays;  // (and their vertex arrays: flushed before one is changed too)
+void BeforeVertexArrayChange()
+{
+    if (!g_seeThroughPendingArrays.empty() &&
+        std::find(g_seeThroughPendingArrays.begin(), g_seeThroughPendingArrays.end(), g_vao) != g_seeThroughPendingArrays.end())
+        FlushSeeThroughDepth();
+}
+void BeforeBufferWrite(GLenum target)
+{
+    if (g_seeThroughPending.empty())
+        return;
+    GLuint buffer = 0;
+    if (target == kArrayBufferTarget) {
+        buffer = g_arrayBuffer;
+    } else if (target == kElementArrayBuffer) {
+        const auto found = g_elementBuffers.find(g_vao);
+        buffer = found != g_elementBuffers.end() ? found->second : 0;
+    }
+    if (buffer && std::find(g_seeThroughPending.begin(), g_seeThroughPending.end(), buffer) != g_seeThroughPending.end())
+        FlushSeeThroughDepth();
+}
+
 // (F10 dump: an array buffer's upload, with its first values - a streamed one each frame is
 // particles, text or the like, and its first values show its layout.)
 void DumpBufferUpload(const char* call, GLenum target, ptrdiff_t offset, ptrdiff_t size, const void* data, GLenum usage)
@@ -2314,6 +2344,7 @@ void APIENTRY Wrap_glBufferData(GLenum target, ptrdiff_t size, const void* data,
     DumpBufferUpload("glBufferData", target, 0, size, data, usage);
     NoteBufferUpdate(target);
     NoteBufferContents(target);
+    BeforeBufferWrite(target);
     real_glBufferData(target, size, data, usage);
 }
 
@@ -2339,6 +2370,7 @@ void APIENTRY Wrap_glBufferSubData(GLenum target, ptrdiff_t offset, ptrdiff_t si
     DumpBufferUpload("glBufferSubData", target, offset, size, data, 0);
     NoteBufferUpdate(target);
     NoteBufferContents(target);
+    BeforeBufferWrite(target);
     real_glBufferSubData(target, offset, size, data);
 }
 
@@ -2354,6 +2386,8 @@ void APIENTRY Wrap_glVertexAttribPointer(GLuint index, GLint size, GLenum type, 
             buffers.push_back(g_arrayBuffer);
         if (index < 16) {
             AttribPointer& a = g_vaoAttribs[static_cast<unsigned long long>(g_vao) << 4 | index];
+            if (a.buffer != g_arrayBuffer || a.offset != reinterpret_cast<uintptr_t>(pointer) || a.stride != stride || a.size != size)
+                BeforeVertexArrayChange();
             if (a.buffer != g_arrayBuffer || a.offset != reinterpret_cast<uintptr_t>(pointer)) {
                 ++g_vaoGeneration[g_vao];
                 g_vaoChangedFrame[g_vao] = g_frameNumber;
@@ -4483,19 +4517,48 @@ void FlushShadowCasters()
 // one whose buffers are rewritten as it goes (the game's dust): those keep the haze of what's behind.
 void KeepSeeThrough(const DrawCall& draw)
 {
-    if (g_seeThroughDraws.size() >= 4096)
+    if (g_seeThroughDraws.size() >= 4096) {
+        DumpCall("v (the next draw) see-through: NOT kept for its own depth (4096 already)");
         return;
+    }
     const auto mv = g_programModelview.find(g_program);
     if (mv == g_programModelview.end() || mv->second.frame != g_frameNumber || mv->second.kind != ModelviewKind::Scene ||
-        mv->second.location < 0)
+        mv->second.location < 0) {
+        DumpCall("v (the next draw) see-through: NOT kept for its own depth (no 3D modelview of this frame: %s)",
+                 mv == g_programModelview.end() ? "none" : mv->second.frame != g_frameNumber ? "an old one" :
+                 mv->second.kind != ModelviewKind::Scene ? "not a scene one" : "no location");
         return;
+    }
     const auto projection = g_programProjection.find(g_program);
-    if (projection == g_programProjection.end() || projection->second.location < 0)
+    if (projection == g_programProjection.end() || projection->second.location < 0) {
+        DumpCall("v (the next draw) see-through: NOT kept for its own depth (no projection of its program's own)");
         return;
-    if (!StaticDraw(draw) || !VertexArraySteady()) {
+    }
+    // Geometry the game writes afresh as it draws (a track's decals, its trees' billboards, dust) too:
+    // drawn for its depth before its buffers are written again (BeforeBufferWrite). Not with bones.
+    const SkinnedProgram* skin = FindSkinned(g_program);
+    const bool bones = skin && skin->positionLoc >= 0 && skin->bones != 0;
+    const bool streamed = !bones && !StaticBuffers(draw);
+    // (A vertex array lately changed is fine for these: they're drawn before it's changed again.)
+    if (bones || (!streamed && !VertexArraySteady()) || g_vao == 0 || g_activeUnit < 0 || g_activeUnit >= 16) {
+        DumpCall("v (the next draw) see-through: NOT kept for its own depth (%s)", bones ? "drawn with bones" : "its vertex array changed lately");
         ++g_seeThroughSkipped;
         return;
     }
+    if (streamed) {
+        if (std::find(g_seeThroughPendingArrays.begin(), g_seeThroughPendingArrays.end(), g_vao) == g_seeThroughPendingArrays.end())
+            g_seeThroughPendingArrays.push_back(g_vao);
+        const auto buffers = g_vaoArrayBuffers.find(g_vao);
+        if (buffers != g_vaoArrayBuffers.end())
+            for (GLuint buffer : buffers->second)
+                if (buffer && std::find(g_seeThroughPending.begin(), g_seeThroughPending.end(), buffer) == g_seeThroughPending.end())
+                    g_seeThroughPending.push_back(buffer);
+        const auto element = g_elementBuffers.find(g_vao);
+        if (element != g_elementBuffers.end() && element->second &&
+            std::find(g_seeThroughPending.begin(), g_seeThroughPending.end(), element->second) == g_seeThroughPending.end())
+            g_seeThroughPending.push_back(element->second);
+    }
+    DumpCall("v (the next draw) see-through: kept for its own depth%s", streamed ? " (streamed: drawn before its buffer is written again)" : "");
     SeeThroughDraw s;
     s.c = MakeCaster(draw, mv->second.location, projection->second.location);
     std::copy(mv->second.uploaded, mv->second.uploaded + 16, s.modelview);
@@ -4509,6 +4572,8 @@ void KeepSeeThrough(const DrawCall& draw)
 // put back after.
 void FlushSeeThroughDepth()
 {
+    g_seeThroughPending.clear();
+    g_seeThroughPendingArrays.clear();
     const int skipped = g_seeThroughSkipped;
     g_seeThroughSkipped = 0;
     if (g_seeThroughDraws.empty())
@@ -4523,6 +4588,12 @@ void FlushSeeThroughDepth()
         real_glDrawArrays = reinterpret_cast<PFN_DrawArrays>(GetRealGLFunction("glDrawArrays"));
     if (!upload || !real_glUseProgram || !real_glBindVertexArray || !real_glActiveTexture || !bindTexture ||
         !postfx::BeginSeeThroughDepth()) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("postfx: %zu see-through draws couldn't be drawn again for their depth (no depth target, or the scene isn't drawn to the window)",
+                g_seeThroughDraws.size());
+        }
         g_seeThroughDraws.clear();
         return;
     }
@@ -4700,8 +4771,10 @@ bool NoteDraw(const DrawCall& draw)
         }
         if (placed && skyShot)
             postfx::SnapshotSky();
-        if (placed && seeShot)
+        if (placed && seeShot) {
+            DumpCall("v (the next draw) takes the see-through snapshot: what's drawn after it without depth is told apart");
             postfx::SnapshotSeeThrough();
+        }
     }
     if (!g_depthWrites && !g_terrain.isTerrain && postfx::WantsSeeThroughDepth())
         KeepSeeThrough(draw);

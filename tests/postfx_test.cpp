@@ -20,6 +20,12 @@
 //               in that variable), its bolt white-hot against the sky and its flash lighting the clouds
 //     shadows   screen-space sun shadows only: the object shades the ground beside it
 //     offscreen shadow maps: a tower behind the camera shades the ground in view
+//     treestream  treeghost with the block's geometry written afresh every frame (a tree's billboards):
+//               still told apart from the ground
+//     decal     the same with flat see-through decals on the dirt, after the dust: the one in the
+//               tower's shadow is shaded (a stadium floor's decals once lost every shadow)
+//     decalstream  the same, the decals written afresh every frame and drawn before the dust (a stadium
+//               floor's): none of them takes the see-through snapshot
 //     stadium   the same under a roof 120 m across: the roof is left out, the ground stays sunny
 //     stadiumswap  the roof made in a deleted box's place (another track loaded): still left out
 //     hilltree  the offscreen scene with a box 18 m up (a tree on a hill above you): no stadium, so it
@@ -275,6 +281,12 @@ int main(int argc, char** argv)
     const bool stadiumSwap = mode == "stadiumswap";
     const bool stadium = mode == "stadium" || stadiumSwap;
     const bool hillTree = mode == "hilltree";
+    // decal: the offscreen scene with flat see-through decals on the dirt (a track's painted patches, drawn
+    // without depth after the first see-through draw): the one in the tower's shadow keeps it.
+    // decalstream: the same, the decals' geometry written afresh every frame (as the game streams a track's
+    // decals) and drawn before the dust: none of them may take the see-through snapshot.
+    const bool decalStream = mode == "decalstream";
+    const bool decal = mode == "decal" || decalStream;
 
     // A folder of our own with the DLL and an ini for the mode.
     wchar_t temp[MAX_PATH];
@@ -307,7 +319,7 @@ int main(int argc, char** argv)
         settings = base.replace(base.find("DirtDetail=0"), 12, "DirtDetail=1\nUltraGraphics=1");
     else if (mode == "night")
         settings = base.replace(base.find("TimeOfDay=-1"), 12, "TimeOfDay=0");
-    else if (mode == "treeghost")  // a grey "trunk" drawn without depth on the dirt: no dirt, AO or shadow through it
+    else if (mode == "treeghost" || mode == "treestream")  // a grey "trunk" drawn without depth on the dirt: no dirt, AO or shadow through it
         settings = base.replace(base.find("DirtDetail=0"), 12, "DirtDetail=1\nUltraGraphics=1")
                        .replace(base.find("Shadows=0") + 4, 9, "Shadows=1\nShadowMap=1");
     else if (mode == "treefog")  // rain: a tall grey "tree" drawn without depth, in front of the near ground, the far
@@ -337,7 +349,7 @@ int main(int argc, char** argv)
         settings = base;
     else if (mode == "shadows")  // screen-space shadows alone
         settings = base.replace(base.find("Shadows=0"), 9, "Shadows=1\nShadowMap=0");
-    else if (mode == "offscreen" || stadium || hillTree)  // shadow maps alone (the screen-space ones as short as they go)
+    else if (mode == "offscreen" || stadium || hillTree || decal)  // shadow maps alone (the screen-space ones as short as they go)
         settings = base.replace(base.find("Shadows=0"), 9, "Shadows=1\nShadowMap=1\nShadowLength=1");
     else if (mode == "headlight" || mode == "narrowbeam" || mode == "thirdperson" || mode == "headlightup" ||
              mode == "headlightdown" || mode == "headlightamber" || mode == "headlightrainbow") {
@@ -580,8 +592,8 @@ int main(int argc, char** argv)
     const GLint oColor = gl.GetUniformLocation(object, "u_color");
 
     // Meshes: the unit patch (indices in a buffer, like the game's) and a 1 m cube, and a quad.
-    GLuint arrays[9] = {};
-    gl.GenVertexArrays(9, arrays);
+    GLuint arrays[10] = {};
+    gl.GenVertexArrays(10, arrays);
     const auto mesh = [&](GLuint array, const float* vertices, size_t vertexBytes, int components,
                           const unsigned short* indices, size_t indexBytes, GLuint* made = nullptr) {
         GLuint local[2] = {};
@@ -602,7 +614,8 @@ int main(int argc, char** argv)
                              -0.5f, 0, 0.5f,   0.5f, 0, 0.5f,   -0.5f, 1, 0.5f,   0.5f, 1, 0.5f };
     const unsigned short cubeIndices[36] = { 0, 2, 1, 1, 2, 3,  4, 5, 6, 5, 7, 6,  0, 4, 2, 4, 6, 2,
                                              1, 3, 5, 5, 3, 7,  2, 6, 3, 3, 6, 7,  0, 1, 4, 4, 1, 5 };
-    mesh(arrays[1], cube, sizeof cube, 3, cubeIndices, sizeof cubeIndices);
+    GLuint cubeBuffers[2] = {};
+    mesh(arrays[1], cube, sizeof cube, 3, cubeIndices, sizeof cubeIndices, cubeBuffers);
     // (shadowfar: 2400 cubes in one world-space buffer, out to 300 units ahead and 150 to either side.)
     constexpr int kFarBoxes = 2400;
     GLuint farArray = 0;
@@ -634,6 +647,10 @@ int main(int argc, char** argv)
         mesh(arrays[7], roofVertices, sizeof roofVertices, 3, cubeIndices, sizeof cubeIndices, roofBuffers);
     const float quad[12] = { -1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0 };
     mesh(arrays[2], quad, sizeof quad, 3, patchIndices, sizeof patchIndices);
+    // A decal: a flat 1.2 m square lying 2 cm over the ground (decal mode).
+    const float decalQuad[12] = { -0.6f, 0.02f, -0.6f,  0.6f, 0.02f, -0.6f,  -0.6f, 0.02f, 0.6f,  0.6f, 0.02f, 0.6f };
+    GLuint decalBuffers[2] = {};
+    mesh(arrays[9], decalQuad, sizeof decalQuad, 3, patchIndices, sizeof patchIndices, decalBuffers);
     // A wheel: a 2 m square across its axle (its own x), standing in for the rim and tire.
     const float wheelQuad[12] = { 0, -1, -1,  0, 1, -1,  0, -1, 1,  0, 1, 1 };
     mesh(arrays[3], wheelQuad, sizeof wheelQuad, 3, patchIndices, sizeof patchIndices);
@@ -697,9 +714,9 @@ int main(int argc, char** argv)
     // throws its shadow forward onto the visible ground.
     const bool headShadow = mode == "headshadow";
     const bool farTower = mode == "longshadow" || mode == "oldshadow" || mode == "longsharp";
-    const float sunEye[3] = { mode == "shadows" ? 0.8f : mode == "backshadow" ? 0.25f : (mode == "offscreen" || stadium || hillTree) || farTower ? 0.0f : headShadow ? -0.5f : 0.3f,
-                              mode == "shadows" ? 0.6f : mode == "backshadow" ? 0.95f : (mode == "offscreen" || stadium || hillTree) || farTower ? 0.15f : headShadow ? 0.17f : 0.8f,
-                              mode == "shadows" ? 0.0f : (mode == "offscreen" || stadium || hillTree) || farTower ? 0.99f : headShadow ? 0.83f : 0.5f };
+    const float sunEye[3] = { mode == "shadows" ? 0.8f : mode == "backshadow" ? 0.25f : (mode == "offscreen" || stadium || hillTree || decal) || farTower ? 0.0f : headShadow ? -0.5f : 0.3f,
+                              mode == "shadows" ? 0.6f : mode == "backshadow" ? 0.95f : (mode == "offscreen" || stadium || hillTree || decal) || farTower ? 0.15f : headShadow ? 0.17f : 0.8f,
+                              mode == "shadows" ? 0.0f : (mode == "offscreen" || stadium || hillTree || decal) || farTower ? 0.99f : headShadow ? 0.83f : 0.5f };
     const float hud[16] = { 0.05f, 0, 0, 0, 0, 0.05f, 0, 0, 0, 0, 0.05f, 0, 0, 0.3f, -1, 1 };  // scaled: the HUD
     const float flare[16] = { 0.05f, 0, 0, 0, 0, 0.05f, 0, 0, 0, 0, 0.05f, 0, -0.3f, 0.3f, -1, 1 };  // the game's lens flare
     const int flareX = static_cast<int>((1.0f - projection[0] * 0.3f) * 0.5f * W);
@@ -1182,7 +1199,11 @@ int main(int argc, char** argv)
             }
             p_glDepthMask(GL_TRUE);
         }
-        if (mode == "treeghost") {  // (a 1 m grey block on the dirt 5 m ahead, a little left, no depth written)
+        if (mode == "treeghost" || mode == "treestream") {  // (a 1 m grey block on the dirt 5 m ahead, a little left, no depth written)
+            if (mode == "treestream") {  // (its geometry written afresh every frame, as the game does its trees' billboards)
+                gl.BindBuffer(0x8892, cubeBuffers[0]);
+                gl.BufferData(0x8892, static_cast<ptrdiff_t>(sizeof cube), cube, 0x88E8);
+            }
             gl.UniformMatrix4fv(oProj, 1, GL_FALSE, projection);
             gl.Uniform3fv(oLight, 1, sunEye);
             const float trunkModel[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1.6f, 0.0f, -5.0f, 1 };
@@ -1243,7 +1264,7 @@ int main(int argc, char** argv)
             gl.UniformMatrix4fv(oMv, 1, GL_FALSE, viewModel);
             p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
         }
-        if (mode == "offscreen" || stadium || hillTree) {  // a 2 m tower of two boxes, 0.8 m behind the camera and 1 m right
+        if (mode == "offscreen" || stadium || hillTree || decal) {  // a 2 m tower of two boxes, 0.8 m behind the camera and 1 m right
             if (hillTree) {
                 // First a see-through puff whose depth writes are put back by glPopAttrib, not
                 // glDepthMask: the tower after it is solid and must still cast.
@@ -1264,6 +1285,33 @@ int main(int argc, char** argv)
                 gl.UniformMatrix4fv(oMv, 1, GL_FALSE, viewModel);
                 p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
             }
+            if (decalStream) {  // (before the dust, written afresh: the see-through snapshot is taken at the dust)
+                gl.BindBuffer(0x8892, decalBuffers[0]);
+                gl.BufferData(0x8892, static_cast<ptrdiff_t>(sizeof decalQuad), decalQuad, 0x88E8);
+                const float decalColor[3] = { 0.36f, 0.27f, 0.2f };
+                gl.Uniform3fv(oColor, 1, decalColor);
+                gl.BindVertexArray(arrays[9]);
+                gl.BindBuffer(0x8893, decalBuffers[1]);  // (its indices bound again: the game's vertex array changes every frame)
+                p_glEnable(GL_BLEND);
+                p_glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                p_glDepthMask(GL_FALSE);
+                for (int side = 0; side < 2; ++side) {
+                    const float at[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, side ? -1.0f : 1.0f, 0.0f, -3.5f, 1 };
+                    Mul(view, at, viewModel);
+                    gl.UniformMatrix4fv(oMv, 1, GL_FALSE, viewModel);
+                    p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                }
+                p_glDepthMask(GL_TRUE);
+                // The buffer written again at once with something else (the game's next batch in the same
+                // buffer): the decals' depth must be taken before.
+                const float elsewhere[12] = { 500, 50, 500,  501, 50, 500,  500, 50, 501,  501, 50, 501 };
+                gl.BindBuffer(0x8893, cubeBuffers[1]);  // (another batch's indices first, on the same vertex array)
+                gl.BindBuffer(0x8892, decalBuffers[0]);
+                gl.BufferData(0x8892, static_cast<ptrdiff_t>(sizeof elsewhere), elsewhere, 0x88E8);
+                gl.BindVertexArray(arrays[1]);
+                gl.Uniform3fv(oColor, 1, red);
+                p_glDisable(GL_BLEND);
+            }
             // Kicked-up dirt: a see-through cloud (blended, not writing depth) just as tall, on the
             // other side. It must not cast a solid shadow onto the sunny ground.
             p_glEnable(GL_BLEND);
@@ -1277,6 +1325,20 @@ int main(int argc, char** argv)
             }
             p_glDepthMask(GL_TRUE);
             p_glDisable(GL_BLEND);
+            if (decal && !decalStream) {  // (after the dust: the see-through snapshot is taken by then)
+                const float decalColor[3] = { 0.36f, 0.27f, 0.2f };
+                gl.Uniform3fv(oColor, 1, decalColor);
+                gl.BindVertexArray(arrays[9]);
+                p_glDepthMask(GL_FALSE);
+                for (int side = 0; side < 2; ++side) {
+                    const float at[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, side ? -1.0f : 1.0f, 0.0f, -3.5f, 1 };
+                    Mul(view, at, viewModel);
+                    gl.UniformMatrix4fv(oMv, 1, GL_FALSE, viewModel);
+                    p_glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                }
+                p_glDepthMask(GL_TRUE);
+                gl.BindVertexArray(arrays[1]);
+            }
             if (hillTree) {
                 // Last before the HUD, a lobby's faded rider: the same program, a uniform its shader
                 // throws everything away with. The tower's held-back cast must still be drawn with
@@ -1679,7 +1741,7 @@ int main(int argc, char** argv)
         printf("    the blocks from row %d to %d: top third %.1f, bottom third %.1f (a step of %.1f)\n", top, bottom, upper, lower,
                std::fabs(upper - lower));
         Check(std::fabs(upper - lower) < 3.0, "what's drawn see-through is fogged as far off as it is, alike all the way up");
-    } else if (mode == "treeghost") {
+    } else if (mode == "treeghost" || mode == "treestream") {
         // The block's middle on screen, and how much its pixels vary (the dirt's grain through it would).
         const float world[4] = { -1.6f, 0.5f, -5.0f, 1 };
         float eye[4] = {}, clip[4] = {};
@@ -1808,7 +1870,7 @@ int main(int argc, char** argv)
             Check(log.find("(18 m around the camera, 4096x4096)") != std::string::npos,
                   "an old ini's ShadowDistance=60 (feet) and ShadowMapSize=4096 read as before: 18 m at 4096");
         }
-    } else if (mode == "offscreen" || stadium || hillTree) {
+    } else if (mode == "offscreen" || stadium || hillTree || decal) {
         std::string log;
         if (FILE* in = _wfsopen((dir + L"MXS_REMASTERED.log").c_str(), L"rb", _SH_DENYNO)) {
             char buffer[4096];
@@ -1828,8 +1890,12 @@ int main(int argc, char** argv)
         // Ground 3.5 m ahead and 1 m right (in the tower's shadow) against 1 m left (in the sun).
         const Pixel shaded = At(604, 374), sunny = At(356, 374);
         printf("    ground right %d %d %d (tower's shadow), left %d %d %d\n", shaded.r, shaded.g, shaded.b, sunny.r, sunny.g, sunny.b);
-        Check(shaded.r + 25 < sunny.r, "something off screen casts a shadow (shadow map)");
-        Check(Near(sunny, drawnGround, 3), "ground in the sun stays as it was (see-through dust casts no block)");
+        if (decal) {
+            Check(shaded.r + 25 < sunny.r, "a decal lying on the ground in the tower's shadow is shaded (not taken for see-through)");
+        } else {
+            Check(shaded.r + 25 < sunny.r, "something off screen casts a shadow (shadow map)");
+            Check(Near(sunny, drawnGround, 3), "ground in the sun stays as it was (see-through dust casts no block)");
+        }
         Check(Near(box, drawnBox, 3), "the object in front isn't shadowed by itself");
     } else if (mode == "headlightup" || mode == "headlightdown") {
         // Up the middle of the picture, from the bottom: how far out the beam lights the ground. (Level,
