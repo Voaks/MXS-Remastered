@@ -14,10 +14,14 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
 
 #include "log.h"
 #include "paths.h"
@@ -186,37 +190,87 @@ bool Send(const std::string& name, bool writing, double now)
 #endif
 }
 
+// The setups folder is read on a thread of its own, never the game's: with many setups, or the folder
+// somewhere slow to open files in (synced to the cloud, scanned by an antivirus), reading them all on
+// the game's thread every second made the game stutter while the menu was open. A file's bike= line
+// is read again only when the file changed (kept by its write time; only the scan's thread uses it).
+struct KnownFile {
+    long long   stamp = 0;
+    std::string bike;
+};
+
+std::mutex         g_scanLock;
+std::vector<Setup> g_scanned;          // (the scan's result, under g_scanLock)
+bool               g_scanDone = false;  // (under g_scanLock)
+std::atomic<bool>  g_scanning{ false };
+
+void ScanSetups(std::wstring folder)
+{
+    static std::unordered_map<std::wstring, KnownFile> known;  // (one scan at a time: g_scanning)
+    std::vector<Setup> list;
+    try {
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(folder), error)) {
+            if (!entry.is_regular_file(error))
+                continue;
+            Setup s;
+            s.name = entry.path().filename().u8string();  // (as UTF-8: never throws on a name the code page lacks)
+            std::error_code timeError;
+            const auto written = entry.last_write_time(timeError);
+            const long long stamp = timeError ? 0 : static_cast<long long>(written.time_since_epoch().count());
+            const std::wstring path = entry.path().wstring();
+            const auto was = known.find(path);
+            if (stamp != 0 && was != known.end() && was->second.stamp == stamp) {
+                s.bike = was->second.bike;
+            } else {
+                if (FILE* f = _wfsopen(path.c_str(), L"rb", _SH_DENYNO)) {
+                    char line[256];
+                    while (fgets(line, sizeof line, f)) {
+                        if (strncmp(line, "bike=", 5) == 0) {
+                            s.bike = line + 5;
+                            while (!s.bike.empty() && (s.bike.back() == '\n' || s.bike.back() == '\r'))
+                                s.bike.pop_back();
+                            break;
+                        }
+                    }
+                    fclose(f);
+                }
+                known[path] = KnownFile{ stamp, s.bike };
+            }
+            list.push_back(std::move(s));
+        }
+        std::sort(list.begin(), list.end(), [](const Setup& a, const Setup& b) { return Upper(a.name) < Upper(b.name); });
+    } catch (...) {
+        // (A name or a folder the file system calls couldn't take: what was listed so far stands.)
+    }
+    {
+        std::lock_guard<std::mutex> hold(g_scanLock);
+        g_scanned = std::move(list);
+        g_scanDone = true;
+    }
+    g_scanning = false;
+}
+
 }  // namespace
 
 const std::vector<Setup>& List(double now)
 {
-    if (now - g_listedAt < 1.0)
-        return g_list;
-    g_listedAt = now;
-    g_list.clear();
-    if (!paths::PersonalFolder()[0])
-        return g_list;
-    std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(Folder()), error)) {
-        if (!entry.is_regular_file(error))
-            continue;
-        Setup s;
-        s.name = entry.path().filename().u8string();  // (as UTF-8: never throws on a name the code page lacks)
-        if (FILE* f = _wfsopen(entry.path().wstring().c_str(), L"rb", _SH_DENYNO)) {
-            char line[256];
-            while (fgets(line, sizeof line, f)) {
-                if (strncmp(line, "bike=", 5) == 0) {
-                    s.bike = line + 5;
-                    while (!s.bike.empty() && (s.bike.back() == '\n' || s.bike.back() == '\r'))
-                        s.bike.pop_back();
-                    break;
-                }
-            }
-            fclose(f);
+    {
+        std::lock_guard<std::mutex> hold(g_scanLock);
+        if (g_scanDone) {
+            g_list.swap(g_scanned);
+            g_scanDone = false;
         }
-        g_list.push_back(s);
     }
-    std::sort(g_list.begin(), g_list.end(), [](const Setup& a, const Setup& b) { return Upper(a.name) < Upper(b.name); });
+    if (now - g_listedAt >= 1.0 && !g_scanning.load() && paths::PersonalFolder()[0]) {
+        g_listedAt = now;
+        g_scanning = true;
+        try {
+            std::thread(ScanSetups, Folder()).detach();
+        } catch (...) {
+            g_scanning = false;
+        }
+    }
     return g_list;
 }
 

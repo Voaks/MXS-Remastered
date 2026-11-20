@@ -381,6 +381,7 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Graphics",  L"UltraGraphics",        c.ultraGraphics ? 1.0 : 0.0 },
         { L"Graphics",  L"TireDirt",             c.tireDirt },
         { L"Graphics",  L"BikeDirt",             c.bikeDirt },
+        { L"Graphics",  L"RiderDirt",            c.riderDirt },
         { L"Graphics",  L"Roost",                c.roost },
         { L"Graphics",  L"RoostDust",            c.roostDust },
         { L"Graphics",  L"RoostEveryBike",       c.roostEveryBike ? 1.0 : 0.0 },
@@ -618,6 +619,7 @@ void CopyTunables(const Config& from, Config& to)
     to.snowTires            = from.snowTires;
     to.tireDirt             = from.tireDirt;
     to.bikeDirt             = from.bikeDirt;
+    to.riderDirt            = from.riderDirt;
     to.roost                = from.roost;
     to.roostDust            = from.roostDust;
     to.roostEveryBike       = from.roostEveryBike;
@@ -964,6 +966,7 @@ Config ParseConfig(const Config& base)
     c.snowTires        = Clamp(ReadDouble(L"Weather", L"SnowTires", c.snowTires), 0.0, 1.0);
     c.tireDirt         = ReadDouble(L"Graphics", L"TireDirt", c.tireDirt);
     c.bikeDirt         = ReadDouble(L"Graphics", L"BikeDirt", c.bikeDirt);
+    c.riderDirt        = ReadDouble(L"Graphics", L"RiderDirt", c.riderDirt);
     c.roost            = Clamp(ReadDouble(L"Graphics", L"Roost", c.roost), 0.0, 1.0);
     c.roostDust        = Clamp(ReadDouble(L"Graphics", L"RoostDust", c.roostDust), 0.0, 1.0);
     c.roostEveryBike   = ReadInt(L"Graphics", L"RoostEveryBike", c.roostEveryBike) != 0;
@@ -1071,6 +1074,7 @@ Config ParseConfig(const Config& base)
     c.markDepth            = Clamp(c.markDepth, 0.0, 1.0);
     c.tireDirt             = Clamp(c.tireDirt, 0.0, 1.0);
     c.bikeDirt             = Clamp(c.bikeDirt, 0.0, 1.0);
+    c.riderDirt            = Clamp(c.riderDirt, 0.0, 1.0);
     c.motionBlur           = Clamp(c.motionBlur, 0.0, 1.0);
     c.depthOfField         = Clamp(c.depthOfField, 0.0, 1.0);
     c.dofFocus             = Clamp(c.dofFocus, 0.0, 500.0);

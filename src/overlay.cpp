@@ -1547,6 +1547,10 @@ const RowDef kRows[] = {
               "lower half - the engine, swingarm, fork legs, the fenders' undersides - thickest where the "
               "wheels throw it, and at 100% most of the bike covered. Only your bike, never anyone else's. "
               "Your tires have their own setting (Tire dirt)."),
+    Slider(kTabGraphics, nullptr,           "Rider dirt",           &Config::riderDirt,        0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
+        .Help("Mud and dust on your own rider's gear: caked on the boots and shins, splatter up the "
+              "knees and the front of the pants, a dusting on the jersey and gloves - more of all of it "
+              "as it goes up. Only your rider, never anyone else's."),
     Slider(kTabGraphics, nullptr,           "Roost",                &Config::roost,            0.0,   1.0,   0.01,   100.0,  0, "%", "Off")
         .Help("The dirt your rear tire throws: dark clods flying back in arcs and a sheet of dust "
               "behind you, most when you're on the gas and sliding through turns, thrown out of the "
@@ -3375,7 +3379,8 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
     const float notesBarH = S(64);
     // SETUPS: a strip along the top for a new one (its name, SAVE AS NEW), the game's setups under it.
     const bool setupsPage = g_panel.tab == kTabSetups && !g_panel.notes && !searching;
-    const std::vector<setups::Setup>& setupList = setups::List(now);
+    static const std::vector<setups::Setup> kNoSetups;
+    const std::vector<setups::Setup>& setupList = setupsPage ? setups::List(now) : kNoSetups;  // (read only on its tab)
     if (setupsPage)
         listH = notesBarH + S(14) + std::max<size_t>(setupList.size(), 1) * rowH + S(30);
     if (g_panel.notes) {

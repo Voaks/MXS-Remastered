@@ -2092,7 +2092,9 @@ constexpr char kMudFragmentDecl[] =
     "uniform float u_mx_body;\n"        // the body dirt on a part of your bike (0: off; see PaintBikeDirt)
     "uniform highp mat4 u_mx_tobike;\n" // the part's model -> your bike, metres (x across, y up from the axles, z forward from between them)
     "uniform mat3 u_mx_bikeview;\n"     // directions in the view -> your bike
-    "uniform vec4 u_mx_bodyp;\n"        // half the wheelbase (m), how wet (0..1), snow (0/1), -
+    "uniform vec4 u_mx_bodyp;\n"        // half the wheelbase (m), how wet (0..1), snow (0/1), your rider (1: rider dirt)
+    "uniform vec4 u_mx_rleg;\n"         // your rider at rest: its feet's, knees', hips' height, -
+    "uniform vec4 u_mx_rarm;\n"         // your rider at rest: its shoulders' and elbows' reach out, its shoulders' height, -
     "uniform float u_mx_armfade;\n"     // your upper arms faded (0: off; see SetArmFade)
     "uniform highp vec3 u_mx_arm[4];\n" // at rest: the left shoulder, elbow, the right shoulder, elbow
     "highp float mx_hash(highp vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }\n"
@@ -2148,11 +2150,28 @@ constexpr char kArmFragmentApply[] =
     "\t\t\tdiscard;\n"
     "\t}\n";
 
+// RIDER DIRT (u_mx_bodyp.w set: your own rider's gear, see OwnRiderDraw): the same mud, as much all over
+// the rider (the user: it should grow the same all around, not from the feet up) - in patches on the
+// gear's own rest pose (mx_pos: it stays on the gear as it moves) - a little more on what faces forward
+// (the rider stands in a T at rest, facing its -z) and down, a little less on what faces up. Which way
+// the surface faces at rest: from the triangle's own slope in mx_pos, turned outwards as the view's own
+// slope says.
 constexpr char kBodyFragmentApply[] =
     "\tif (u_mx_body > 0.0) {\n"
+    "\t\thighp vec3 mx_q = mx_pos * (1.0 / u_mx_metre);\n"
+    "\t\tfloat mx_reach, mx_up, mx_base = 0.55;\n"
+    "\t\thighp vec3 mx_sq = mx_q;\n"
+    "\t\tif (u_mx_bodyp.w > 0.5) {\n"
+    "\t\t\thighp vec3 mx_rn = cross(dFdx(mx_pos), dFdy(mx_pos));\n"
+    "\t\t\thighp vec3 mx_vn = cross(dFdx(interp_viewer), dFdy(interp_viewer));\n"
+    "\t\t\tmx_rn = dot(mx_rn, mx_rn) > 0.0 ? normalize(mx_rn) * (dot(mx_vn, interp_normal) < 0.0 ? -1.0 : 1.0) : vec3(0.0);\n"
+    "\t\t\tfloat mx_front = smoothstep(0.05, 0.7, -mx_rn.z);\n"
+    "\t\t\tmx_up = smoothstep(0.35, 0.9, mx_rn.y);\n"
+    "\t\t\tmx_reach = clamp(0.5 + 0.08 * mx_front + 0.08 * smoothstep(0.2, 0.8, -mx_rn.y) - 0.06 * mx_up, 0.0, 1.0);\n"
+    "\t\t\tmx_base = 0.3;\n"
+    "\t\t} else {\n"
     "\t\thighp vec3 mx_b = (u_mx_tobike * vec4(mx_pos, 1.0)).xyz;\n"
     "\t\tvec3 mx_bn = normalize(u_mx_bikeview * normalize(interp_normal));\n"
-    "\t\thighp vec3 mx_q = mx_pos * (1.0 / u_mx_metre);\n"
     "\t\tfloat mx_hw = u_mx_bodyp.x;\n"
     "\t\tfloat mx_low = 1.0 - smoothstep(-0.05, 0.8, mx_b.y);\n"
     "\t\tfloat mx_df = length(vec2(mx_b.y, mx_b.z - mx_hw));\n"
@@ -2161,10 +2180,12 @@ constexpr char kBodyFragmentApply[] =
     "\t\tfloat mx_sprr = (1.0 - smoothstep(0.36, 0.85, mx_dr)) * (mx_b.z > -mx_hw ? 1.0 : 0.6);\n"
     "\t\tfloat mx_inner = 1.0 - smoothstep(0.08, 0.3, abs(mx_b.x));\n"
     "\t\tfloat mx_under = smoothstep(0.1, 0.7, -mx_bn.y);\n"
-    "\t\tfloat mx_up = smoothstep(0.35, 0.9, mx_bn.y);\n"
+    "\t\tmx_up = smoothstep(0.35, 0.9, mx_bn.y);\n"
     "\t\tfloat mx_ahead = smoothstep(0.3, 0.9, mx_bn.z);\n"
-    "\t\tfloat mx_reach = clamp(0.55 * mx_low + 0.55 * max(mx_sprf, mx_sprr) + 0.15 * mx_inner * mx_low, 0.0, 1.0);\n"
+    "\t\tmx_reach = clamp(0.55 * mx_low + 0.55 * max(mx_sprf, mx_sprr) + 0.15 * mx_inner * mx_low, 0.0, 1.0);\n"
     "\t\tmx_reach = clamp(mx_reach * (1.0 + 0.45 * mx_under + 0.15 * mx_ahead - 0.3 * mx_up), 0.0, 1.0);\n"
+    "\t\tmx_sq = mx_q * vec3(1.0, 1.0, 0.65);\n"
+    "\t\t}\n"
     "\t\tfloat mx_patch = mx_noise(mx_q * 4.0 + 5.0) * 0.6 + mx_noise(mx_q * 9.0 + 17.0) * 0.4;\n"
     "\t\tfloat mx_clump = mx_noise(mx_q * 22.0 + 3.0) * 0.55 + mx_noise(mx_q * 51.0 + 9.0) * 0.3 + mx_noise(mx_q * 120.0 + 21.0) * 0.15;\n"
     "\t\tfloat mx_streak = mx_noise(mx_q * vec3(14.0, 1.6, 14.0) + 61.0);\n"
@@ -2172,10 +2193,9 @@ constexpr char kBodyFragmentApply[] =
     "\t\t             (mx_clump - 0.5) * 0.35;\n"
     "\t\tfloat mx_thick = smoothstep(0.42, 0.6, mx_t);\n"
     "\t\tfloat mx_smear = smoothstep(0.16, 0.42, mx_t) * (1.0 - mx_thick);\n"
-    "\t\tfloat mx_film = clamp(u_mx_body * (0.55 + 0.7 * mx_reach + 0.25 * mx_up) * (0.6 + 0.8 * mx_streak), 0.0, 1.0);\n"
+    "\t\tfloat mx_film = clamp(u_mx_body * (mx_base + 0.7 * mx_reach + 0.25 * mx_up) * (0.6 + 0.8 * mx_streak), 0.0, 1.0);\n"
     // (flecks: round drops of mud in three sizes, a little drawn out along the bike - flung back off the
     // wheels - many near the wheels and low down, few up top; each size faded out once it's under a pixel)
-    "\t\thighp vec3 mx_sq = mx_q * vec3(1.0, 1.0, 0.65);\n"
     "\t\tfloat mx_dens = clamp(u_mx_body * (0.15 + 1.1 * mx_reach) - 0.08, 0.0, 0.9);\n"
     "\t\tfloat mx_fw = length(fwidth(mx_sq));\n"
     "\t\tfloat mx_fleck = max(max(mx_dot(mx_sq * 45.0, mx_dens, 45.0 * mx_fw), mx_dot(mx_sq * 75.0 + 13.0, mx_dens, 75.0 * mx_fw)),\n"
@@ -4928,9 +4948,272 @@ bool KeepOwnPart(const DrawCall& draw, const double toBike[16], const BodyFrame&
     return !learnt || riddenWith;
 }
 
+// ---- Rider dirt: mud and dust on your own rider's gear (kBodyFragmentApply, u_mx_bodyp.w) ----------
+// The same bike shader draws the riders. A rider's draw gets the mud only if it's yours, by the same
+// rules as your bike's parts:
+//  - in first person, the rider with the game's eye in its head (as Hide torso & head);
+//  - else the one followed from frame to frame: its torso bone where it was in the world a frame ago,
+//    gone on as it was going (a rider moves smoothly - even crashing; another is a metre and more away);
+//  - and none followed (just joined, a respawn): the rider sat on your bike - its torso bone in your
+//    bike's seat - for 30 frames on end, the same one all along (a rider riding by never is: yours
+//    moves against it). A rider sat on your bike while the one followed is 2 m and more off it is taken
+//    instead (the one followed was someone else).
+// Your rider's measure at rest (u_mx_rleg / u_mx_rarm), from its bones' rest centres: of the bones off
+// the body's midline, four each side - the two highest the arm (the shoulder nearer the midline, the
+// elbow out), the other two the leg (the hip nearer the torso bone, the knee below); its feet a shin
+// below the knees.
+struct RiderTrack {
+    bool     have = false;
+    unsigned frame = 0;             // the frame world was last set
+    double   world[3] = {};         // your rider's torso bone in the world (game units)
+    bool     haveVelocity = false;
+    double   velocity[3] = {};      // its move a frame
+    bool     offBike = false;       // last seen 2 m and more from your bike
+    unsigned seatFrames = 0, seatFrame = 0;
+    double   seatWorld[3] = {};     // a rider sat on your bike (to take it up)
+    unsigned shown = 0;             // frames your rider was given the dirt in (for the log)
+    bool     haveHead = false;      // where its head is (your helmet: see OwnHelmetDraw)
+    unsigned headFrame = 0;
+    double   head[3] = {};          // (world, game units)
+};
+RiderTrack g_riderTrack;
+constexpr unsigned kRiderTakeFrames = 30;
+
+bool RiderAtRest(const SkinnedProgram& skin, int bones, int& torso, GLfloat leg[4], GLfloat arm[4], int shoulders[2] = nullptr,
+                 int hips[2] = nullptr)
+{
+    double halfSpan = 0;
+    for (int b = 0; b < bones; ++b)
+        halfSpan = std::max(halfSpan, std::fabs(double(skin.centre[b * 3])));
+    if (halfSpan < 1e-3)
+        return false;
+    torso = -1;
+    for (int b = 0; b < bones; ++b)
+        if (std::fabs(skin.centre[b * 3]) <= 0.05 * halfSpan && (torso < 0 || skin.centre[b * 3 + 1] > skin.centre[torso * 3 + 1]))
+            torso = b;
+    if (torso < 0)
+        return false;
+    double shoulderX = 0, elbowX = 0, shoulderY = 0, hipY = 0, kneeY = 0;
+    for (int side = 0; side < 2; ++side) {
+        int limb[kMaxBones], count = 0;
+        for (int b = 0; b < bones; ++b) {
+            const float x = skin.centre[b * 3];
+            if (side ? x > 0.05 * halfSpan : x < -0.05 * halfSpan)
+                limb[count++] = b;
+        }
+        if (count != 4)
+            return false;
+        std::sort(limb, limb + 4, [&](int x, int y) { return skin.centre[x * 3 + 1] > skin.centre[y * 3 + 1]; });
+        const auto Out = [&](int b) { return std::fabs(double(skin.centre[b * 3])); };
+        const auto FromTorso = [&](int b) {
+            double d = 0;
+            for (int k = 0; k < 3; ++k)
+                d += (skin.centre[b * 3 + k] - skin.centre[torso * 3 + k]) * (skin.centre[b * 3 + k] - skin.centre[torso * 3 + k]);
+            return d;
+        };
+        const int shoulder = Out(limb[0]) <= Out(limb[1]) ? limb[0] : limb[1], elbow = shoulder == limb[0] ? limb[1] : limb[0];
+        const int hip = FromTorso(limb[2]) <= FromTorso(limb[3]) ? limb[2] : limb[3], knee = hip == limb[2] ? limb[3] : limb[2];
+        if (shoulders)
+            shoulders[side] = shoulder;
+        if (hips)
+            hips[side] = hip;
+        shoulderX += 0.5 * Out(shoulder);
+        elbowX += 0.5 * Out(elbow);
+        shoulderY += 0.5 * skin.centre[shoulder * 3 + 1];
+        hipY += 0.5 * skin.centre[hip * 3 + 1];
+        kneeY += 0.5 * skin.centre[knee * 3 + 1];
+    }
+    if (!(hipY > kneeY && shoulderY > hipY && elbowX > shoulderX))
+        return false;
+    const double footY = kneeY - (hipY - kneeY);
+    leg[0] = static_cast<GLfloat>(footY);
+    leg[1] = static_cast<GLfloat>(kneeY);
+    leg[2] = static_cast<GLfloat>(hipY);
+    leg[3] = 0.0f;
+    arm[0] = static_cast<GLfloat>(shoulderX);
+    arm[1] = static_cast<GLfloat>(elbowX);
+    arm[2] = static_cast<GLfloat>(shoulderY);
+    arm[3] = 0.0f;
+    return true;
+}
+
+// Whether the rider about to be drawn is yours (its measure at rest in leg / arm).
+bool OwnRiderDraw(const SkinnedProgram& skin, GLfloat leg[4], GLfloat arm[4])
+{
+    const int bones = skin.bones;
+    int torso = -1, shoulders[2] = { -1, -1 }, hips[2] = { -1, -1 };
+    if (!RiderAtRest(skin, bones, torso, leg, arm, shoulders, hips))
+        return false;
+    // Its torso bone: in the game camera's space (the modelview the game sent), and in the world.
+    const float* m = skin.rawView;
+    const float* p = skin.position + torso * 3;
+    double raw[3], world[3], view[16], inv[16];
+    for (int r = 0; r < 3; ++r)
+        raw[r] = double(m[r]) * p[0] + double(m[4 + r]) * p[1] + double(m[8 + r]) * p[2] + m[12 + r];
+    if (!postfx::FrameRawView(view) || !InverseAffine(view, inv))
+        return false;
+    for (int r = 0; r < 3; ++r)
+        world[r] = inv[r] * raw[0] + inv[4 + r] * raw[1] + inv[8 + r] * raw[2] + inv[12 + r];
+    BodyFrame& f = CurrentBodyFrame();
+    const double u = f.unitsPerMetre > 0.0 ? f.unitsPerMetre : 3.2808;
+    // Where it is on your bike (metres: x across, y up from the axles' line, z forward from between them).
+    bool onSeat = false, nearBike = false;
+    double seat[3] = {};
+    if (f.have) {
+        for (int r = 0; r < 3; ++r)
+            seat[r] = f.fromRaw[r] * raw[0] + f.fromRaw[4 + r] * raw[1] + f.fromRaw[8 + r] * raw[2] + f.fromRaw[12 + r];
+        onSeat = std::fabs(seat[0]) < 0.5 && seat[1] > -0.2 && seat[1] < 1.8 && seat[2] > -1.2 && seat[2] < 0.8;
+        nearBike = seat[0] * seat[0] + seat[1] * seat[1] + seat[2] * seat[2] < 2.0 * 2.0;
+    }
+    RiderTrack& t = g_riderTrack;
+    const auto Apart = [&](const double a[3], const double b[3]) {
+        const double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz) / u;
+    };
+    bool hidden[kMaxBones] = {};
+    double rest[3] = {}, size = 0;
+    const bool firstPerson = OwnTorso(skin, bones, hidden, rest, &size);
+    if (t.have && g_frameNumber - t.frame > 64) {
+        t.have = false;
+        Log("rider dirt: your rider not seen for 64 frames: looking for it on your bike again");
+    }
+    bool follows = false;
+    if (t.have) {
+        const double frames = static_cast<double>(g_frameNumber - t.frame);
+        const double ahead = t.haveVelocity ? frames : 0.0;
+        const double expected[3] = { t.world[0] + t.velocity[0] * ahead, t.world[1] + t.velocity[1] * ahead, t.world[2] + t.velocity[2] * ahead };
+        const double reach = std::min(3.0, 0.3 + 0.1 * frames + (t.haveVelocity ? 0.0 : 0.32 * frames));
+        follows = Apart(world, expected) <= reach;
+    }
+    // A rider sat on your bike: counted frame by frame (the same one: following itself).
+    bool take = false;
+    if (onSeat && !follows) {
+        if (t.seatFrame != g_frameNumber) {
+            const bool same = t.seatFrames > 0 && t.seatFrame + 1 == g_frameNumber && Apart(world, t.seatWorld) < 0.5;
+            t.seatFrames = same ? t.seatFrames + 1 : 1;
+            t.seatFrame = g_frameNumber;
+            std::copy(world, world + 3, t.seatWorld);
+        }
+        take = t.seatFrames >= kRiderTakeFrames && (!t.have || t.offBike);
+    }
+    if (!firstPerson && !follows && !take)
+        return false;
+    static int told = 0;
+    if (!follows && told < 20) {
+        ++told;
+        Log("rider dirt: your rider %s (its torso %.2f m across, %.2f m up, %.2f m along your bike)",
+            firstPerson ? "found: the game's eye is in its head" : t.have ? "taken: sat on your bike while the one followed was off it"
+                                                                           : "found: sat on your bike",
+            seat[0], seat[1], seat[2]);
+    }
+    if (t.frame != g_frameNumber || !follows) {
+        const unsigned frames = g_frameNumber - t.frame;
+        t.haveVelocity = follows && t.have && frames >= 1 && frames <= 3;
+        for (int k = 0; k < 3 && t.haveVelocity; ++k)
+            t.velocity[k] = (world[k] - t.world[k]) / frames;
+        std::copy(world, world + 3, t.world);
+        t.frame = g_frameNumber;
+        t.have = true;
+        t.offBike = f.have && !nearBike;
+        if (++t.shown % 4096 == 1)
+            Log("rider dirt: on your rider (%u frames)", t.shown);
+    }
+    // Its head, for your helmet (a rigid draw of its own: OwnHelmetDraw): at rest, over the shoulders by
+    // 60% of the way up from the hips to them; carried by the torso bone (the head turns with it), the
+    // rest pose's size taken to the bones' (the hips to the shoulders, at rest and as drawn).
+    {
+        const float* c = skin.centre;
+        const float* tp = skin.position;
+        double restSh[3], restHp[3], posSh[3], posHp[3], restLen = 0, posLen = 0;
+        for (int k = 0; k < 3; ++k) {
+            restSh[k] = 0.5 * (double(c[shoulders[0] * 3 + k]) + c[shoulders[1] * 3 + k]);
+            restHp[k] = 0.5 * (double(c[hips[0] * 3 + k]) + c[hips[1] * 3 + k]);
+            posSh[k] = 0.5 * (double(tp[shoulders[0] * 3 + k]) + tp[shoulders[1] * 3 + k]);
+            posHp[k] = 0.5 * (double(tp[hips[0] * 3 + k]) + tp[hips[1] * 3 + k]);
+            restLen += (restSh[k] - restHp[k]) * (restSh[k] - restHp[k]);
+            posLen += (posSh[k] - posHp[k]) * (posSh[k] - posHp[k]);
+        }
+        restLen = std::sqrt(restLen);
+        posLen = std::sqrt(posLen);
+        if (restLen > 1e-4) {
+            const double k = std::min(10.0, std::max(0.1, posLen / restLen));
+            double off[3], model[3], headRaw[3];
+            for (int i = 0; i < 3; ++i)
+                off[i] = (restSh[i] + (restSh[i] - restHp[i]) * 0.6 - c[torso * 3 + i]) * k;
+            const GLfloat* r = skin.rotation + torso * 9;
+            for (int i = 0; i < 3; ++i) {
+                double sum = tp[torso * 3 + i];
+                for (int j = 0; j < 3; ++j)
+                    sum += (skin.transposed ? r[i * 3 + j] : r[j * 3 + i]) * off[j];
+                model[i] = sum;
+            }
+            for (int i = 0; i < 3; ++i)
+                headRaw[i] = double(m[i]) * model[0] + double(m[4 + i]) * model[1] + double(m[8 + i]) * model[2] + m[12 + i];
+            for (int i = 0; i < 3; ++i)
+                t.head[i] = inv[i] * headRaw[0] + inv[4 + i] * headRaw[1] + inv[8 + i] * headRaw[2] + inv[12 + i];
+            t.haveHead = true;
+            t.headFrame = g_frameNumber;
+        }
+    }
+    return true;
+}
+
+// Whether the rigid draw about to be made is your helmet: a mesh the size of one (12 to 70 cm) drawn by
+// the riders' program, its middle within 30 cm of your rider's head - as your rider was drawn this frame,
+// or gone on as it was going since (the helmet can come first). Another rider's head is a metre away.
+bool OwnHelmetDraw(const DrawCall& draw)
+{
+    const RiderTrack& t = g_riderTrack;
+    if (!t.haveHead || g_frameNumber - t.headFrame > 8 || !StaticDraw(draw))
+        return false;
+    const auto mv = g_programModelview.find(g_program);
+    if (mv == g_programModelview.end() || mv->second.frame != g_frameNumber || mv->second.kind != ModelviewKind::Scene ||
+        mv->second.transposed)
+        return false;
+    const DrawBounds* b = CachedBounds(draw);
+    if (!b || !b->valid)
+        return false;
+    const BodyFrame& f = CurrentBodyFrame();
+    const double u = f.unitsPerMetre > 0.0 ? f.unitsPerMetre : 3.2808;
+    const float* raw = mv->second.raw;
+    double mid[3], biggest = 0;
+    for (int c = 0; c < 3; ++c) {
+        mid[c] = 0.5 * (static_cast<double>(b->lo[c]) + b->hi[c]);
+        const double scale = std::sqrt(double(raw[c * 4]) * raw[c * 4] + double(raw[c * 4 + 1]) * raw[c * 4 + 1] +
+                                       double(raw[c * 4 + 2]) * raw[c * 4 + 2]);
+        biggest = std::max(biggest, (static_cast<double>(b->hi[c]) - b->lo[c]) * scale / u);
+    }
+    if (biggest < 0.12 || biggest > 0.7)
+        return false;
+    double view[16], inv[16], at[3], world[3];
+    if (!postfx::FrameRawView(view) || !InverseAffine(view, inv))
+        return false;
+    for (int r = 0; r < 3; ++r)
+        at[r] = double(raw[r]) * mid[0] + double(raw[4 + r]) * mid[1] + double(raw[8 + r]) * mid[2] + raw[12 + r];
+    for (int r = 0; r < 3; ++r)
+        world[r] = inv[r] * at[0] + inv[4 + r] * at[1] + inv[8 + r] * at[2] + inv[12 + r];
+    const double frames = static_cast<double>(g_frameNumber - t.headFrame);
+    const double ahead = t.haveVelocity ? frames : 0.0;
+    double d = 0;
+    for (int k = 0; k < 3; ++k) {
+        const double e = world[k] - (t.head[k] + t.velocity[k] * ahead);
+        d += e * e;
+    }
+    const double apart = std::sqrt(d) / u, reach = 0.3 + 0.05 * frames;
+    if (apart > reach && apart < 0.8) {  // (near your head but not taken: for the log, if your helmet stays clean)
+        static int told = 0;
+        if (told < 10) {
+            ++told;
+            Log("rider dirt: a helmet-sized part (%d indices, %.2f m) %.2f m from your rider's head: not taken for your helmet",
+                draw.count, biggest, apart);
+        }
+    }
+    return apart <= reach;
+}
+
 struct BodyProgram {
     bool  looked = false;
-    GLint amount = -1, toBike = -1, bikeView = -1, params = -1, metre = -1;
+    GLint amount = -1, toBike = -1, bikeView = -1, params = -1, metre = -1, rleg = -1, rarm = -1;
     float set = 0.0f;                          // u_mx_body as it holds
     float paramsSet[4] = { -1, -1, -1, -1 };
     float metreSet = -1.0f;
@@ -4951,6 +5234,8 @@ void PaintBikeDirt(const DrawCall& draw, bool tire)
                 p.bikeView = real_glGetUniformLocation(g_program, "u_mx_bikeview");
                 p.params = real_glGetUniformLocation(g_program, "u_mx_bodyp");
                 p.metre = real_glGetUniformLocation(g_program, "u_mx_metre");
+                p.rleg = real_glGetUniformLocation(g_program, "u_mx_rleg");
+                p.rarm = real_glGetUniformLocation(g_program, "u_mx_rarm");
             }
         }
     }
@@ -4958,7 +5243,51 @@ void PaintBikeDirt(const DrawCall& draw, bool tire)
         return;
     const Config& cfg = GetConfig();
     float want = 0.0f;
-    if (!tire && cfg.shaders && cfg.bikeDirt > 0.0 && real_glUniformMatrix4fv && real_glUniformMatrix3fv && real_glUniform4fv &&
+    // Your rider (a skinned draw of a whole rider: never a part of your bike's body).
+    const SkinnedProgram* skin = FindSkinned(g_program);
+    const bool riderDraw = skin && skin->bones > 0 && skin->bones <= kMaxBones && skin->centres >= skin->bones &&
+                           skin->positions >= skin->bones && skin->rotations >= skin->bones && skin->haveView;
+    const bool riderDirtOn = !tire && cfg.shaders && cfg.riderDirt > 0.0 && real_glUniform4fv && p.params >= 0;
+    // (Your rider's gear and helmet: the rider dirt's look, the same all over.)
+    const auto RiderLook = [&]() {
+        postfx::WetLook look;
+        const float wet = postfx::GetWetLook(look) ? std::min(1.0f, look.wet) : 0.0f;
+        const float params[4] = { 0.0f, wet, cfg.weather == kWeatherSnow ? 1.0f : 0.0f, 1.0f };
+        if (std::memcmp(params, p.paramsSet, sizeof params) != 0) {
+            real_glUniform4fv(p.params, 1, params);
+            std::memcpy(p.paramsSet, params, sizeof params);
+        }
+        const BodyFrame& f = CurrentBodyFrame();
+        const float metre = static_cast<float>(f.unitsPerMetre > 0.0 ? f.unitsPerMetre : 3.2808);
+        if (p.metre >= 0 && metre != p.metreSet) {
+            real_glUniform1f(p.metre, metre);
+            p.metreSet = metre;
+        }
+        want = static_cast<float>(cfg.riderDirt);
+    };
+    if (riderDraw) {
+        GLfloat leg[4], arm[4];
+        if (riderDirtOn && OwnRiderDraw(*skin, leg, arm)) {
+            RiderLook();
+            if (p.rleg >= 0)  // (the rider's measure: not used by the shader now - its dirt is the same all over)
+                real_glUniform4fv(p.rleg, 1, leg);
+            if (p.rarm >= 0)
+                real_glUniform4fv(p.rarm, 1, arm);
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                Log("rider dirt: on your rider (program %u, %d bones; at rest: feet %.2f, knees %.2f, hips %.2f high, shoulders %.2f "
+                    "and elbows %.2f out, shoulders %.2f high)", g_program, skin->bones, leg[0], leg[1], leg[2], arm[0], arm[1], arm[2]);
+            }
+        }
+    } else if (riderDirtOn && skin && skin->bones == 0 && OwnHelmetDraw(draw)) {
+        RiderLook();
+        static std::vector<int> logged;
+        if (logged.size() < 8 && std::find(logged.begin(), logged.end(), draw.count) == logged.end()) {
+            logged.push_back(draw.count);
+            Log("rider dirt: on your helmet (program %u, %d indices)", g_program, draw.count);
+        }
+    } else if (!tire && cfg.shaders && cfg.bikeDirt > 0.0 && real_glUniformMatrix4fv && real_glUniformMatrix3fv && real_glUniform4fv &&
         p.toBike >= 0 && p.bikeView >= 0) {
         const auto mv = g_programModelview.find(g_program);
         BodyFrame& f = CurrentBodyFrame();

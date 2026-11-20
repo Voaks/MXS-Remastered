@@ -148,7 +148,7 @@ bool Enabled()
     const Config& cfg = GetConfig();
     // (Tire dirt watches them whatever else is on: the mud goes only on meshes seen turning like a
     // wheel - see PaintTireDirt. The bike dirt too: it leaves out what turns like a wheel.)
-    return cfg.tireMarks > 0.0 || TireCoat(cfg) > 0.0 || (cfg.shaders && cfg.bikeDirt > 0.0) || (cfg.roost > 0.0 && cfg.roostEveryBike) ||
+    return cfg.tireMarks > 0.0 || TireCoat(cfg) > 0.0 || (cfg.shaders && (cfg.bikeDirt > 0.0 || cfg.riderDirt > 0.0)) || (cfg.roost > 0.0 && cfg.roostEveryBike) ||
            (cfg.headlightEveryBike && cfg.headlight > 0.0 && cfg.timeOfDay >= 0.0);
 }
 
