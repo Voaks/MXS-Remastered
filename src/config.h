@@ -46,6 +46,7 @@ struct Config {
     double headForward    = 0.0;          // eye offset along the bike, units (+ = forward)
     double headHeight     = 0.0;          // eye offset along the bike's up axis (+ = up)
     bool   hideOwnBody    = false;        // hide your own rider's torso and head (for high FOVs)
+    double armFade        = 0.0;          // 0..1 your upper arms faded out from the shoulder towards the elbow, in first person (high FOVs)
 
     // [Smoothing]
     double rotationResponse = 14.0;       // 1/s, 0 = off

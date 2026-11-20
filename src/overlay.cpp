@@ -1375,6 +1375,11 @@ const RowDef kRows[] = {
         .Help("Moves your eyes forward (+) or back (-) along the bike."),
     Slider(kTabFirstPerson, nullptr,           "Head height",          &Config::headHeight,       -3.0,  3.0,  0.01, 1.0,   2, " m")
         .Help("Moves your eyes up (+) or down (-)."),
+    Slider(kTabFirstPerson, nullptr,           "Arm fade",             &Config::armFade,          0.0,   1.0,  0.01,   100.0, 0, "%", "Off")
+        .Help("Fades your arms out from the shoulders down, in first person, so with a high FOV your "
+              "shoulders and arms don't get in the way. More fades further down the arm: at 100% the "
+              "upper arm is gone and the fade runs down the forearm to just before the wrist. Your hands "
+              "stay, and so does your shadow."),
     Toggle(kTabFirstPerson, nullptr,           "Hide torso & head",    &Config::hideOwnBody)
         .Help("Hides your own rider's torso and head (helmet included), so a high FOV doesn't show "
               "them from the inside. Arms and legs stay, and your shadow keeps them all. Only yours: "

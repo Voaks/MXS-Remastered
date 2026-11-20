@@ -747,29 +747,28 @@ vec3 SnowNormal(vec3 n, vec3 wp, vec3 dwx, vec3 dwy, float z, out float crease, 
 // a tire only pressed it, grey slush deeper, where snow and dirt were churned together, and the wet
 // dirt itself at the bottom; along its edges, a lip of the snow it pushed aside. cover: how much of
 // this is snow (for the cold blue of its shadows, after the lighting).
-vec3 Snow(vec3 c, vec3 wp, vec3 dwx, vec3 dwy, vec3 n, float z, float ground, vec2 rut, out float cover)
+vec3 Snow(vec3 c, vec3 wp, vec3 dwx, vec3 dwy, vec3 n, vec3 nb, float z, float ground, vec2 rut, out float cover)
 {
-    float upright = smoothstep(0.35, 0.8, dot(n, u_up));
+    float upright = smoothstep(0.15, 0.55, dot(n, u_up));
     float drifts = PatternNoise(wp, kPatternDrifts) * 0.65 + PatternNoise(wp, kPatternDriftsFine) * 0.35;
-    // (By the amount, as the snow's first slider was: its depth, so less of it is a soft dusting that the
-    // dirt shows through - the steep faces and the hollows between the drifts first - and the dirt under
-    // it only as damp as there's snow. 75% is the snow as it's made; 100% a third deeper.)
+    // (Depth by the amount: thin only near walls or at low amounts. 75% = as made.)
     float amount = u_snow * u_snowAmount / 0.75;
     float depth = amount * (0.45 + 0.55 * upright) * (0.7 + 0.6 * drifts);
-    float settled = smoothstep(0.25, 0.6, depth);
-    // The game's own light on the ground, gently (its texture's blotches mostly left out).
-    float shading = clamp(pow(max(Luma(c), 1e-4) / 0.2, 0.3), 0.65, 1.0);  // (never brighter than the snow itself)
-    // The snow's own relief, lit as the ground is lit (against the ground's plain slope).
+    float settled = smoothstep(0.12, 0.4, depth);
+    // Shaded by the ground's broad shape alone (from the game's picture, its dirt showed through).
+    float sunW = 0.6 * (1.0 - 0.5 * u_overcast);
+    float flatL = 1.0 - sunW + sunW * max(dot(u_up, u_lightWorld), 0.0);
+    float shading = clamp((1.0 - sunW + sunW * max(dot(nb, u_lightWorld), 0.0)) / max(flatL, 0.2), 0.6, 1.08);
     float crease, grain;
     vec3 ns = SnowNormal(n, wp, dwx, dwy, z, crease, grain);
     float before = max(dot(n, u_lightWorld), 0.0) * 0.7 + 0.4;
     float after = max(dot(ns, u_lightWorld), 0.0) * 0.7 + 0.4;
     float relief = clamp(after / before, 0.6, 1.25);
-    vec3 fresh = vec3(0.64, 0.68, 0.74) * (0.94 + 0.06 * PatternNoise(wp, kPatternSnow));
-    fresh *= mix(vec3(0.88, 0.94, 1.08), vec3(1.0), smoothstep(0.8, 1.05, relief));  // turned away: bluer
-    fresh *= mix(vec3(1.0), vec3(0.8, 0.85, 0.93), crease);  // the creases between the puffs: shaded, bluer
-    fresh *= 1.0 + 0.09 * grain;
-    vec3 snow = fresh * shading * relief;  // (no glints: grains a pixel wide or more read as white dashes, and shimmer)
+    vec3 fresh = vec3(0.66, 0.70, 0.76) * (0.95 + 0.05 * PatternNoise(wp, kPatternSnow));
+    fresh *= mix(vec3(0.84, 0.92, 1.1), vec3(1.0), smoothstep(0.7, 1.02, shading * relief));  // turned away: bluer
+    fresh *= mix(vec3(1.0), vec3(0.8, 0.85, 0.93), crease);
+    fresh *= 1.0 + 0.12 * grain;
+    vec3 snow = fresh * shading * relief;  // (no glints: they read as dashes)
     // The rut, by how deep it is.
     float m = rut.x, lip = clamp(rut.y - rut.x, 0.0, 1.0);
     float pressed = smoothstep(0.03, 0.2, m), slushy = smoothstep(0.15, 0.5, m), bare = smoothstep(0.45, 0.85, m);
@@ -1356,7 +1355,8 @@ void main()
             // (Snow on what this pixel shows of the ground: where a groove was dug, its floor - so a rut
             // that is dug into the ground also shows the dirt through the snow.)
             if (u_snow > 0.0 && ground > 0.001)
-                c = Snow(c, wpD, dwx, dwy, nFloor, z, ground, u_marks > 0.0 ? RutStatsAt(pD) : vec2(0.0), snowCover);
+                c = Snow(c, wpD, dwx, dwy, nFloor, normalize(u_viewToWorld * BroadNormal(v_uv, p, nView)), z, ground,
+                         u_marks > 0.0 ? RutStatsAt(pD) : vec2(0.0), snowCover);
             // (Rain: the soaked dirt and the puddles, on what this pixel shows of the ground too - water
             // stands in a rut's floor.)
             // (Its slope over a metre or so, not the mesh's one flat face: see BroadNormal.)

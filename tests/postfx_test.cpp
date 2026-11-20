@@ -539,6 +539,12 @@ int main(int argc, char** argv)
                          rgb[1] / 255.0f, rgb[2] / 255.0f);
                 source = text;
             }
+            // (MXCAM_TEST_GROUND_BLOTCHES=1: dark and light blotches on it, as a track's dirt texture.)
+            if (getenv("MXCAM_TEST_GROUND_BLOTCHES")) {
+                const size_t at = source.find("gl_FragColor = vec4(");
+                source.replace(at, 20, "gl_FragColor = (0.55 + 0.9 * step(0.5, fract(gl_FragCoord.x / 23.0 + 0.5 * "
+                                       "step(0.5, fract(gl_FragCoord.y / 17.0))))) * vec4(");
+            }
             return source.c_str();
         }(), "a_corner");
     // Objects (and the HUD): a flat colour, lit by u_light_position so the sun is known.

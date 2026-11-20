@@ -299,6 +299,7 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Camera",    L"HeadForward",          c.headForward },
         { L"Camera",    L"HeadHeight",           c.headHeight },
         { L"Camera",    L"HideOwnBody",          c.hideOwnBody ? 1.0 : 0.0 },
+        { L"Camera",    L"ArmFade",              c.armFade },
         { L"Smoothing", L"RotationResponse",     c.rotationResponse },
         { L"Smoothing", L"MaxLagDeg",            c.maxLagDeg },
         { L"Leveling",  L"HorizonLock",          c.horizonLock },
@@ -518,6 +519,7 @@ void CopyTunables(const Config& from, Config& to)
     to.headForward          = from.headForward;
     to.headHeight           = from.headHeight;
     to.hideOwnBody          = from.hideOwnBody;
+    to.armFade              = from.armFade;
     to.rotationResponse     = from.rotationResponse;
     to.maxLagDeg            = from.maxLagDeg;
     to.horizonLock          = from.horizonLock;
@@ -819,6 +821,7 @@ Config ParseConfig(const Config& base)
     c.headForward    = ReadDouble(L"Camera", L"HeadForward", c.headForward);
     c.headHeight     = ReadDouble(L"Camera", L"HeadHeight", c.headHeight);
     c.hideOwnBody    = ReadInt(L"Camera", L"HideOwnBody", c.hideOwnBody) != 0;
+    c.armFade        = Clamp(ReadDouble(L"Camera", L"ArmFade", c.armFade), 0.0, 1.0);
 
     c.rotationResponse = ReadDouble(L"Smoothing", L"RotationResponse", c.rotationResponse);
     c.maxLagDeg        = ReadDouble(L"Smoothing", L"MaxLagDeg", c.maxLagDeg);

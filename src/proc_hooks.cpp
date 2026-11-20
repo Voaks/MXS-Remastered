@@ -1443,6 +1443,88 @@ void UploadSkinnedRotations(GLint location, GLsizei count, GLboolean transpose, 
         upload(location, count, transpose, value);
 }
 
+// Your rider's shoulders and elbows at rest (arm: left shoulder, elbow, right shoulder, elbow), from its
+// bones' rest centres: of the bones off the body's midline, four each side; of a side's four, the two
+// highest at rest are the arm - the one nearer the midline turns at the shoulder, the other (the
+// forearm) at the elbow. As postfx FindJoints.
+bool ArmsAtRest(const SkinnedProgram& skin, int bones, const bool hidden[kMaxBones], GLfloat arm[12])
+{
+    double halfSpan = 0;
+    for (int b = 0; b < bones; ++b)
+        halfSpan = std::max(halfSpan, std::fabs(double(skin.centre[b * 3])));
+    if (halfSpan < 1e-3)
+        return false;
+    for (int side = 0; side < 2; ++side) {
+        int limb[kMaxBones], count = 0;
+        for (int b = 0; b < bones; ++b) {
+            const float x = skin.centre[b * 3];
+            if (!hidden[b] && (side ? x > 0.05 * halfSpan : x < -0.05 * halfSpan))
+                limb[count++] = b;
+        }
+        if (count != 4)
+            return false;
+        std::sort(limb, limb + 4, [&](int x, int y) { return skin.centre[x * 3 + 1] > skin.centre[y * 3 + 1]; });
+        const bool firstIn = std::fabs(skin.centre[limb[0] * 3]) <= std::fabs(skin.centre[limb[1] * 3]);
+        const int shoulder = firstIn ? limb[0] : limb[1], elbow = firstIn ? limb[1] : limb[0];
+        for (int i = 0; i < 3; ++i) {
+            arm[side * 6 + i] = skin.centre[shoulder * 3 + i];
+            arm[side * 6 + 3 + i] = skin.centre[elbow * 3 + i];
+        }
+    }
+    return true;
+}
+
+// Arm fade (Config::armFade, kArmFragmentApply): on for a draw of your own rider in first person (the
+// game's eye in its head, as Hide torso & head), off for every other draw of the program - a bike, the
+// scenery, another rider (left on, their own model's points near where your arms rest would be cut).
+struct ArmProgram {
+    bool    looked = false;
+    GLint   fade = -1, arm = -1;
+    float   set = 0.0f;
+    GLfloat armSet[12] = {};
+};
+std::unordered_map<GLuint, ArmProgram> g_armPrograms;
+
+void SetArmFade(const SkinnedProgram& skin, bool complete)
+{
+    ArmProgram& p = g_armPrograms[g_program];
+    if (!p.looked) {
+        p.looked = true;
+        if (real_glGetUniformLocation) {
+            p.fade = real_glGetUniformLocation(g_program, "u_mx_armfade");
+            p.arm = p.fade >= 0 ? real_glGetUniformLocation(g_program, "u_mx_arm") : -1;
+            if (p.arm < 0)
+                p.arm = p.fade >= 0 ? real_glGetUniformLocation(g_program, "u_mx_arm[0]") : -1;
+        }
+    }
+    if (p.fade < 0 || p.arm < 0 || !real_glUniform1f || !real_glUniform3fv)
+        return;
+    const Config& cfg = GetConfig();
+    float want = 0.0f;
+    if (complete && cfg.enabled && cfg.shaders && cfg.armFade > 0.0) {
+        bool hidden[kMaxBones] = {};
+        double rest[3] = {}, size = 0;
+        GLfloat arm[12];
+        if (OwnTorso(skin, skin.bones, hidden, rest, &size) && ArmsAtRest(skin, skin.bones, hidden, arm)) {
+            if (std::memcmp(arm, p.armSet, sizeof arm) != 0) {
+                real_glUniform3fv(p.arm, 4, arm);
+                std::memcpy(p.armSet, arm, sizeof arm);
+            }
+            want = static_cast<float>(cfg.armFade);
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                Log("rider: fading your upper arms (shoulders %.2f %.2f %.2f / %.2f %.2f %.2f, elbows %.2f %.2f %.2f / %.2f %.2f %.2f at rest)",
+                    arm[0], arm[1], arm[2], arm[6], arm[7], arm[8], arm[3], arm[4], arm[5], arm[9], arm[10], arm[11]);
+            }
+        }
+    }
+    if (want != p.set) {
+        real_glUniform1f(p.fade, want);
+        p.set = want;
+    }
+}
+
 // Right before each draw: for your own rider, swap in the hidden torso; otherwise make sure the
 // program holds the game's own bones again.
 void PrepareSkinnedDraw()
@@ -1453,6 +1535,7 @@ void PrepareSkinnedDraw()
     const int bones = skin->bones;
     const bool complete = bones > 0 && bones <= kMaxBones && skin->centres >= bones &&
                           skin->positions >= bones && skin->rotations >= bones && skin->haveView;
+    SetArmFade(*skin, complete);
     if (bones == 0 && skin->haveView) {  // a rigid draw: one bone at its origin (the headlight, tire marks)
         static const GLfloat zero[3] = { 0, 0, 0 }, identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
         postfx::NoteSkeleton(g_program, zero, zero, identity, false, 1, skin->rawView);
@@ -2010,6 +2093,8 @@ constexpr char kMudFragmentDecl[] =
     "uniform highp mat4 u_mx_tobike;\n" // the part's model -> your bike, metres (x across, y up from the axles, z forward from between them)
     "uniform mat3 u_mx_bikeview;\n"     // directions in the view -> your bike
     "uniform vec4 u_mx_bodyp;\n"        // half the wheelbase (m), how wet (0..1), snow (0/1), -
+    "uniform float u_mx_armfade;\n"     // your upper arms faded (0: off; see SetArmFade)
+    "uniform highp vec3 u_mx_arm[4];\n" // at rest: the left shoulder, elbow, the right shoulder, elbow
     "highp float mx_hash(highp vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }\n"
     "highp float mx_noise(highp vec3 x) {\n"
     "    highp vec3 i = floor(x); highp vec3 f = fract(x); f = f * f * (3.0 - 2.0 * f);\n"
@@ -2037,6 +2122,32 @@ constexpr char kMudFragmentDecl[] =
 // thick it is there, in patches and lumps on the part's own model (the mud stays on it as the fork
 // and swingarm move): a film (see-through), a smear, caked (its own lumpy bump, darker and a little
 // shiny where it's still moist, lighter where it dried), with flecks over it. In the snow, slush.
+// Arm fade (Config::armFade): your own rider's arms, from the shoulder down past the elbow, dropped
+// pixel by pixel in a fine pattern - more of them nearer the shoulder - which reads as a smooth fade
+// (no sorting, as see-through drawing would need). Where on the arm: the point at rest (mx_pos) along
+// shoulder -> elbow and on (0 at the shoulder, 1 at the elbow; the rider rests in a T, the forearm
+// carrying the line on: the wrist about 2), within half the upper arm's length of that line (the
+// sleeve, the shoulder's cap a little past the joint). At 100% the upper arm is gone and the fade runs
+// down the forearm to just before the wrist (the end 1.8, the fade 0.9 long); less, from nearer the
+// shoulder. (Only to the elbow, as first made, it barely showed: in first person the upper arm is
+// mostly off the screen - what's seen is the forearm.) Only in the view itself: the shadow map's
+// projection is flat (its w exactly 1), and your shadow keeps whole arms.
+constexpr char kArmFragmentApply[] =
+    "\tif (u_mx_armfade > 0.0 && abs(gl_FragCoord.w - 1.0) > 1e-6) {\n"
+    "\t\tfloat mx_keep = 1.0;\n"
+    "\t\tfor (int mx_s = 0; mx_s < 2; ++mx_s) {\n"
+    "\t\t\thighp vec3 mx_sh = u_mx_arm[mx_s * 2], mx_ax = u_mx_arm[mx_s * 2 + 1] - mx_sh;\n"
+    "\t\t\thighp float mx_l2 = max(dot(mx_ax, mx_ax), 1e-6);\n"
+    "\t\t\thighp float mx_t = dot(mx_pos - mx_sh, mx_ax) / mx_l2;\n"
+    "\t\t\thighp float mx_side = length(mx_pos - mx_sh - mx_ax * mx_t) / sqrt(mx_l2);\n"
+    "\t\t\tfloat mx_end = 0.3 + 1.5 * u_mx_armfade;\n"
+    "\t\t\tfloat mx_on = (1.0 - smoothstep(0.45, 0.65, mx_side)) * smoothstep(-0.6, -0.35, mx_t);\n"
+    "\t\t\tmx_keep = min(mx_keep, mix(1.0, smoothstep(mx_end - 0.9, mx_end, mx_t), mx_on));\n"
+    "\t\t}\n"
+    "\t\tif (mx_keep < 1.0 && mx_keep <= fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))))\n"
+    "\t\t\tdiscard;\n"
+    "\t}\n";
+
 constexpr char kBodyFragmentApply[] =
     "\tif (u_mx_body > 0.0) {\n"
     "\t\thighp vec3 mx_b = (u_mx_tobike * vec4(mx_pos, 1.0)).xyz;\n"
@@ -2283,7 +2394,7 @@ std::string MudShader(GLuint shader, const std::string& source)
         changed.insert(at + strlen("interp_texcoord = vattr_texcoord;"), "\n\tmx_pos = vattr_position;");
     } else {
         changed.insert(changed.find("out vec4 f_fragcolor;") + strlen("out vec4 f_fragcolor;") + 1, kMudFragmentDecl);
-        changed.insert(changed.find("\tz = gl_FragCoord.z / gl_FragCoord.w;"), std::string(kBodyFragmentApply) + kMudFragmentApply);
+        changed.insert(changed.find("\tz = gl_FragCoord.z / gl_FragCoord.w;"), std::string(kArmFragmentApply) + kBodyFragmentApply + kMudFragmentApply);
     }
     using PFN_GetShaderiv = void(APIENTRY*)(GLuint, GLenum, GLint*);
     static const auto get = reinterpret_cast<PFN_GetShaderiv>(GetRealGLFunction("glGetShaderiv"));
@@ -4526,14 +4637,6 @@ bool PairedWheel(const DrawCall& draw)
 // joined, standing still), one shaped like a wheel, 45 to 95 cm across.
 bool AtOwnAxle(const DrawCall& draw)
 {
-    const auto element = g_elementBuffers.find(g_vao);
-    const GLuint elements = element != g_elementBuffers.end() ? element->second : 0;
-    const bool known = !TestWheelsUnseen() && (lobby::IsWheel(g_program, g_vao, elements, draw) || lobby::SeenTurning(g_program, g_vao, elements, draw));
-    if (!known) {
-        const SkinnedProgram* skin = FindSkinned(g_program);
-        if ((skin && skin->bones != 0) || !StaticDraw(draw))
-            return false;  // (a rider's body)
-    }
     const auto mv = g_programModelview.find(g_program);
     if (mv == g_programModelview.end() || mv->second.frame != g_frameNumber || mv->second.kind != ModelviewKind::Scene ||
         mv->second.transposed)
@@ -4546,6 +4649,18 @@ bool AtOwnAxle(const DrawCall& draw)
     for (int k = 0; k < 16; ++k)
         raw[k] = mv->second.raw[k];
     Mul4(f.fromRaw, raw, toBike);
+    // (Everything with its model's origin over 6 m from your bike - the scenery, the other bikes: over
+    // a thousand draws a frame in a full lobby - is left at once, before the lookups below.)
+    if (toBike[12] * toBike[12] + toBike[13] * toBike[13] + toBike[14] * toBike[14] > 6.0 * 6.0)
+        return false;
+    const auto element = g_elementBuffers.find(g_vao);
+    const GLuint elements = element != g_elementBuffers.end() ? element->second : 0;
+    const bool known = !TestWheelsUnseen() && (lobby::IsWheel(g_program, g_vao, elements, draw) || lobby::SeenTurning(g_program, g_vao, elements, draw));
+    if (!known) {
+        const SkinnedProgram* skin = FindSkinned(g_program);
+        if ((skin && skin->bones != 0) || !StaticDraw(draw))
+            return false;  // (a rider's body)
+    }
     if (!known) {
         if (!RoundBounds(draw, mid, axle, radius))
             return false;
@@ -4861,7 +4976,9 @@ void PaintBikeDirt(const DrawCall& draw, bool tire)
             for (int k = 0; k < 16; ++k)
                 raw[k] = mv->second.raw[k];
             Mul4(f.fromRaw, raw, toBike);
-            const int known = KnownOwnPart(draw, mv->second, f, toBike, exact, &fixed);
+            // (Over 6 m from your bike - the scenery, the other bikes - left at once.)
+            const bool byYourBike = toBike[12] * toBike[12] + toBike[13] * toBike[13] + toBike[14] * toBike[14] <= 6.0 * 6.0;
+            const int known = byYourBike ? KnownOwnPart(draw, mv->second, f, toBike, exact, &fixed) : 0;
             bool inBox = false;
             if (known >= 0) {
                 mine = known == 1;
