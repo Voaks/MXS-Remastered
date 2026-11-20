@@ -971,6 +971,8 @@ Config ParseConfig(const Config& base)
     c.hideCursor       = ReadInt(L"Other", L"HideCursor", c.hideCursor) != 0;
     c.dabIndicator     = ReadInt(L"Other", L"DabIndicator", c.dabIndicator) != 0;
     c.lapTimer         = ReadInt(L"Other", L"LapTimer", c.lapTimer) != 0;
+    // (A debug view, kept out of the presets and never written: [Debug] ShadowView=1..4, see Config.)
+    c.shadowView       = Clamp(static_cast<int>(GetPrivateProfileIntW(L"Debug", L"ShadowView", 0, g_path)), 0, 4);
     c.brakeSqueal      = Clamp(ReadDouble(L"Other", L"BrakeSqueal", c.brakeSqueal), 0.0, 1.0);
     c.dirtSlide        = Clamp(ReadDouble(L"Other", L"DirtSlide", c.dirtSlide), 0.0, 1.0);
     c.dabSticky        = Clamp(ReadInt(L"Other", L"DabSticky", c.dabSticky), 0, 2);

@@ -1272,13 +1272,14 @@ void SetupShadowFrame()
         return;
     MatMul(lightView, invView, g_shadow.toLight);
     // From 12 m around you out to the shadow distance, each about the same times bigger than the
-    // last; each mostly ahead of the camera. Their centres move in whole texels of their own, so
-    // shadow edges don't crawl as the camera moves.
+    // last; each mostly ahead of the camera (its centre 70% of its half ahead: little of it behind,
+    // where nothing's seen - at 45%, a stadium floor 60 m off fell to the coarsest one at some angles).
+    // Their centres move in whole texels of their own, so shadow edges don't crawl as the camera moves.
     const double tile = ShadowMapSize(cfg) / 2.0;
     const double nearest = std::fmin(half, 12.0 * UnitsPerMetre());
     for (int c = 0; c < kCascades; ++c) {
         const double h = nearest * std::pow(half / nearest, double(c) / (kCascades - 1));
-        const Vec3 centre = camera + ahead * (h * 0.45);
+        const Vec3 centre = camera + ahead * (h * 0.7);
         const double texel = 2.0 * h / tile;
         const double cx = std::floor(Dot(centre, x) / texel) * texel - ox;
         const double cy = std::floor(Dot(centre, y) / texel) * texel - oy;
@@ -6727,6 +6728,7 @@ void Render(int w, int h)
         // Always on its own unit: a shadow sampler may not share one with an ordinary sampler.
         Bind(p, "u_shadowMap", 5, g_res.shadowMap);
         g_gl.Uniform1f(p["u_shadowMapOn"], shadowMapOn ? 1.0f : 0.0f);
+        g_gl.Uniform1f(p["u_shadowView"], static_cast<float>(cfg.shadowView));
         if (shadowMapOn) {
             float matrices[kCascades][16], bias[kCascades], texelWorld[kCascades];
             for (int c = 0; c < kCascades; ++c) {

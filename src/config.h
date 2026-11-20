@@ -217,7 +217,10 @@ struct Config {
     bool   hideCursor       = false;      // hide the game's mouse cursor while riding (same)
     double brakeSqueal      = 0.0;        // 0..1 the brake squeal's loudness (brake.cpp; 0 = off): OTHER, SOUND MODS
     bool   dabIndicator     = false;      // bottom right: red standing, green while the game's Sit/Dab key sits you (dab.cpp)
-    bool   lapTimer         = false;      // your laps timed from the track's own timing gates (laptimer.h); where: LapTimerPlace
+    bool   lapTimer         = false;
+    int    shadowView       = 0;          // [Debug] ShadowView: 0 off; 1 the detailed shadows' cascades tinted (red, green,
+                                          // blue, yellow: sharpest to coarsest), the light on them; 2 only the ground turned
+                                          // from the sun; 3 only the shadows things cast; 4 the light the two leave      // your laps timed from the track's own timing gates (laptimer.h); where: LapTimerPlace
     int    dabSticky        = 0;          // the indicator's Sticky Sit/Dab: 0 = as the game's config file says, 1 = off
                                           // (held), 2 = on (a press switches). The game writes its file only now and
                                           // then (not when the setting is changed), so it can say the old one.

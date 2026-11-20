@@ -233,6 +233,7 @@ uniform float u_time;
 uniform float u_pixelAngle;     // radians per pixel
 uniform sampler2DShadow u_shadowMap;  // depth seen from the sun (shadow map)
 uniform float u_shadowMapOn;
+uniform float u_shadowView;     // Config::shadowView: a debug view of the detailed shadows (0 off)
 uniform mat4  u_viewToShadow[4];  // view space -> each cascade's clip space (the sun's)
 uniform float u_shadowTexel;      // one texel of the whole map (the cascades are its 2 x 2 tiles)
 uniform float u_shadowBias[4];
@@ -285,7 +286,8 @@ float CascadeShadow(int i, vec3 p, vec3 n, float onGround, out float inside)
     vec4 s = u_viewToShadow[i] * vec4(q, 1.0);
     vec3 c = s.xyz / s.w * 0.5 + 0.5;
     vec2 e = min(c.xy, 1.0 - c.xy);
-    inside = clamp((min(e.x, e.y) - 0.03) / 0.12, 0.0, 1.0);
+    // (Blended into the next one out over its outer 6%.)
+    inside = clamp((min(e.x, e.y) - 0.02) / 0.06, 0.0, 1.0);
     if (c.z >= 1.0 || inside <= 0.0)
         return 1.0;
     vec2 tile = vec2(float(i - (i / 2) * 2), float(i / 2)) * 0.5;  // each a quarter tile of the map
@@ -296,14 +298,22 @@ float CascadeShadow(int i, vec3 p, vec3 n, float onGround, out float inside)
     // strip across a berm's face, and its shadow's edge came out as a staircase. (The same nine taps.)
     // (How soft, by the softness setting: half way, a little crisper than they've been - the extra
     // on ground the sun grazes softened the riders' and bikes' shadows in a low sun as well.)
+    // (The two far cascades' texels show as stairs even set crisp: on the ground, smoothed a little.)
+    float far = i >= 3 ? 1.0 : (i == 2 ? 0.5 : 0.0);
     float spread = object ? mix(1.0, 2.0, u_shadowSoft)
-                          : mix(1.0, 1.5, u_shadowSoft) + 1.25 * u_shadowSoft * grazing * grazing;
+                          : max(mix(1.0, 1.5, u_shadowSoft), 1.0 + 0.6 * far) +
+                                1.25 * max(u_shadowSoft, 0.6 * far) * grazing * grazing;
     float sum = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x)
             sum += texture(u_shadowMap, vec3(uv + vec2(float(x), float(y)) * u_shadowTexel * spread, c.z - u_shadowBias[i]));
     return sum / 9.0;
 }
+
+// (For the debug view, Config::shadowView: the cascade the last MapShadow took, what it cast, and what
+// the ground turned from the sun gave.)
+int   g_viewCascade = -1;
+float g_viewCast = 1.0, g_viewSide = 1.0;
 
 float MapShadow(vec3 p, vec3 n, float onGround)
 {
@@ -315,6 +325,7 @@ float MapShadow(vec3 p, vec3 n, float onGround)
         float lit = CascadeShadow(i, p, n, onGround, inside);
         if (inside <= 0.0)
             continue;
+        g_viewCascade = i;
         if (inside >= 1.0)
             return lit;
         if (i == 3)
@@ -1094,7 +1105,7 @@ vec3 TraceReflection(vec3 p, vec3 r, float jitter, out float found)
 // standing on it - your arm, the bike, a fence - is in that, so none of them can print a ghost of
 // itself into the shine), each counted less the further it is from p itself (the ground past a
 // crest, behind it on screen, isn't this ground).
-vec3 BroadNormal(vec2 uv, vec3 p, vec3 nLocal)
+vec3 BroadNormalIn(sampler2D depthTex, vec2 uv, vec3 p, vec3 nLocal)
 {
     float z = max(-p.z, 1e-3);
     float s = clamp(0.6 * u_metre * u_proj[1][1] / (2.0 * u_texel.y * z), 1.0, 40.0);  // pixels
@@ -1102,17 +1113,18 @@ vec3 BroadNormal(vec2 uv, vec3 p, vec3 nLocal)
     for (int i = 0; i < 6; ++i) {
         float a = float(i) * 1.0471976 + 0.5;
         vec2 suv = uv + vec2(cos(a), sin(a)) * (s * (i - (i / 2) * 2 == 0 ? 1.0 : 0.55)) * u_texel;
-        float d = textureLod(u_terrainDepth, suv, 0.0).r;
+        float d = textureLod(depthTex, suv, 0.0).r;
         if (IsSky(d) || !OnScreen(suv))
             continue;
         vec3 q = ViewPos(suv, d);
         float w = 1.0 - smoothstep(1.2 * u_metre, 2.5 * u_metre, length(q - p));
-        vec3 nq = NormalAt(u_terrainDepth, suv, q);
+        vec3 nq = NormalAt(depthTex, suv, q);
         if (w > 0.0 && dot(nq, nLocal) > 0.2)
             sum += nq * w;
     }
     return normalize(sum);
 }
+vec3 BroadNormal(vec2 uv, vec3 p, vec3 nLocal) { return BroadNormalIn(u_terrainDepth, uv, p, nLocal); }
 
 // Rain on the ground (WEATHER): the dirt soaked, darker and deeper in colour (more so around the
 // puddles), and muddy water standing in them. Returns the ground's own colour; refl / reflW: what
@@ -1367,13 +1379,31 @@ void main()
                     // (Cut at edge-on, as this was, a berm face edge-on to a low sun behind a wall had
                     // its noisy normal flip pixel by pixel between the wall's shadow and full sun: a
                     // speckled patch where the shadow should have been solid.)
-                    float sunSide = smoothstep(-0.02, 0.12, towards);
+                    // (Far off: by the ground's slope smoothed over a metre, eased in gently - the
+                    // depth's slope gets noisy with distance.)
+                    float far = smoothstep(12.0 * u_metre, 30.0 * u_metre, z);
+                    float towardsSun = towards;
+                    if (far > 0.0 && abs(towards) < 0.35)
+                        towardsSun = dot(normalize(mix(nView, BroadNormal(v_uv, p, nView), far)), u_lightView);
+                    float sunSide = smoothstep(-0.02 - 0.08 * far, 0.12 + 0.08 * far, towardsSun);
                     float shade = sunSide > 0.0 ? MapShadow(p, nView, ground) : 0.0;
                     lit = min(lit, sunSide * shade);
+                    g_viewSide = sunSide;
+                    g_viewCast = sunSide > 0.0 ? shade : 1.0;
                 } else {
-                    float facing = smoothstep(0.0, 0.2, towards);
-                    if (facing > 0.0)
-                        lit = min(lit, mix(1.0, MapShadow(p, nView, ground), facing));
+                    // (Far off: by its slope smoothed over a metre, eased in gently - noisy, a stadium's
+                    // floor piece edge-on to the light took blotches of an arch's shadow.)
+                    float far = smoothstep(12.0 * u_metre, 30.0 * u_metre, z);
+                    float towardsSun = towards;
+                    if (far > 0.0 && abs(towards) < 0.35)
+                        towardsSun = dot(normalize(mix(nView, BroadNormalIn(u_depth, v_uv, p, nView), far)), u_lightView);
+                    float facing = smoothstep(0.1 * far, 0.2 + 0.15 * far, towardsSun);
+                    g_viewSide = facing;
+                    if (facing > 0.0) {
+                        float cast = MapShadow(p, nView, ground);
+                        lit = min(lit, mix(1.0, cast, facing));
+                        g_viewCast = cast;
+                    }
                 }
             }
             ao = mix(1.0, ao, u_ao);
@@ -1419,6 +1449,14 @@ void main()
             float clear = u_depthOk > 0.5 ? exp(-z / (150.0 * u_metre) * u_weatherHaze) : 1.0;
             c += albedo * u_flashColour * (1.5 * u_flash * lit * clear);
         }
+    }
+    // The debug view (Config::shadowView), over the 3D scene.
+    if (u_shadowView > 0.5 && u_depthOk > 0.5 && !IsSky(textureLod(u_depth, v_uv, 0.0).r)) {
+        int view = int(u_shadowView + 0.5);
+        vec3 tint = g_viewCascade == 0 ? vec3(1.0, 0.35, 0.35) : g_viewCascade == 1 ? vec3(0.35, 1.0, 0.35)
+                  : g_viewCascade == 2 ? vec3(0.4, 0.55, 1.0) : g_viewCascade == 3 ? vec3(1.0, 1.0, 0.3) : vec3(0.6);
+        float shown = view == 2 ? g_viewSide : view == 3 ? g_viewCast : g_viewSide * g_viewCast;
+        c = view == 1 ? tint * mix(0.25, 1.0, shown) : vec3(shown);
     }
     o_color = vec4(c, 1.0);
 }
