@@ -1861,6 +1861,17 @@ constexpr double kAdjustHold   = 0.6;  // s the menu stays faded after the last 
 constexpr ULONGLONG kRevealMs = 3000;
 std::atomic<ULONGLONG> g_lastMouseActivity{ 0 };
 std::atomic<int>       g_gameEscapes{ 0 };       // Esc presses that reached the game
+// The game's pause key (its settings' pause_key, for the lap timer): its virtual key (0: none known), its
+// scan code where two keys share the virtual key (0: any), whether it's an extended key; and its presses
+// that reached the game.
+std::atomic<unsigned>  g_pauseVk{ 0 }, g_pauseScan{ 0 };
+std::atomic<bool>      g_pauseExtended{ false };
+std::atomic<int>       g_pausePresses{ 0 };
+bool IsPauseKey(unsigned vk, unsigned scan, bool extended)
+{
+    const unsigned want = g_pauseVk.load(std::memory_order_relaxed), wantScan = g_pauseScan.load(std::memory_order_relaxed);
+    return want != 0 && vk == want && (wantScan == 0 || (scan == wantScan && extended == g_pauseExtended.load(std::memory_order_relaxed)));
+}
 std::atomic<bool>      g_keyMessages{ false };   // the game gets its keys as window messages
 std::atomic<long long> g_lastMousePos{ 0 };   // (x << 32) | y, screen pixels
 std::atomic<HWND>      g_gameWindow{ nullptr };
@@ -2068,6 +2079,9 @@ LRESULT CALLBACK PanelWindowProc(HWND window, UINT message, WPARAM wParam, LPARA
         g_keyMessages = true;
         if (wParam == VK_ESCAPE && !(lParam & (1 << 30)) && !g_menuOpen.load(std::memory_order_relaxed))
             ++g_gameEscapes;
+        if (!(lParam & (1 << 30)) && !g_menuOpen.load(std::memory_order_relaxed) &&
+            IsPauseKey(static_cast<unsigned>(wParam), static_cast<unsigned>((lParam >> 16) & 0xFF), ((lParam >> 24) & 1) != 0))
+            ++g_pausePresses;
     }
     // The game's cursor while riding (Config::hideCursor), if it's the system's: none over the
     // game while the mouse is left alone. A move sends this first, and shows the game's again.
@@ -4719,10 +4733,33 @@ void SetTimerHot(float x, float y, float w, float h)
 // Each frame (menu open or not): your bike's place to the timer.
 void LapTimerUpdate(double now)
 {
-    if (!GetConfig().lapTimer)
+    if (!GetConfig().lapTimer) {
+        g_pausePresses = 0;
         return;
+    }
+    // The game's pause key, from its settings (read again every few seconds: cheap, and the game rewrites
+    // them when it quits).
+    static double keyReadAt = -1e9;
+    if (now - keyReadAt > 5.0) {
+        keyReadAt = now;
+        setups::GameKey key;
+        const bool known = setups::ReadGameKey("pause_key", key);
+        static std::string told = "\x01";
+        if (key.name != told) {
+            told = key.name;
+            if (known)
+                Log("lap timer: the game's pause key: \"%s\" (the clock stops while the game's paused)", key.name.c_str());
+            else
+                Log("lap timer: the game's pause key \"%s\" isn't a keyboard key: pausing isn't seen", key.name.c_str());
+        }
+        g_pauseVk = known ? key.vk : 0u;
+        g_pauseScan = known ? key.scan : 0u;
+        g_pauseExtended = known && key.extended;
+    }
     double position[3] = {};
     const bool have = SceneOnScreen() && postfx::OwnPosition(position);
+    for (int presses = g_pausePresses.exchange(0); presses > 0; --presses)
+        laptimer::PauseKey(now);
     laptimer::Update(now, have, position);
 }
 
@@ -4797,7 +4834,27 @@ void LapTimerFrame(HWND window, double now)
         SetTimerHot(l.x, l.y, l.pinX + l.pin - l.x, l.h);
 
     // What it says.
-    const laptimer::Display d = laptimer::Current(now);
+    laptimer::Display d = laptimer::Current(now);
+    // (For tests: MXCAM_TEST_LAP_SHOW=missed|invalid - the panel showing lap 4 with a gate missed, running
+    // or just ended over the finish line, whatever is timed.)
+    static const int testShow = [] {
+        char text[16] = "";
+        if (GetEnvironmentVariableA("MXCAM_TEST_LAP_SHOW", text, sizeof text) <= 0)
+            return 0;
+        return strcmp(text, "invalid") == 0 ? 2 : strcmp(text, "paused") == 0 ? 3 : 1;
+    }();
+    if (testShow) {
+        d = laptimer::Display{};
+        d.track = true;
+        d.lap = 4;
+        d.gates = 5;
+        d.split = testShow == 2 ? 4 : 1;
+        d.current = 21.0;
+        d.best = 32.0;
+        d.finished = testShow == 2;
+        d.valid = testShow == 3;
+        d.paused = testShow == 3;
+    }
     char lapNumber[8], cur[16], pace[16], best[16], gate[16], gap[16];
     if (d.lap > 0)
         snprintf(lapNumber, sizeof lapNumber, "%d", d.lap);
@@ -4810,7 +4867,9 @@ void LapTimerFrame(HWND window, double now)
         snprintf(gate, sizeof gate, "%d/%d", d.split, d.gates);
     else
         snprintf(gate, sizeof gate, "-");
-    if (d.haveGap)
+    if (d.paused && d.lap > 0 && !d.finished)
+        snprintf(gap, sizeof gap, "PAUSED");  // (the game paused: the clock stopped)
+    else if (d.haveGap)
         snprintf(gap, sizeof gap, "%+.2f", d.gap);
     else
         snprintf(gap, sizeof gap, "--.--");
@@ -4851,31 +4910,39 @@ void LapTimerFrame(HWND window, double now)
     }
     const float left = l.x + U(16), right = l.x + l.w - U(12);
     const float smallPx = U(14), bigPx = U(32), tagPx = U(19);
-    // Row 1: LAP 3 ... G 7/38 (the G red; amber when this lap missed one).
+    // Row 1: LAP 3 ... GATE 7/38 (GATE red; amber when this lap missed one).
     const float row1 = l.y + U(8);
+    const uint32_t amber = Rgba(255, 176, 64, 1.0f);
     Draw(kFontSection, left, row1, "LAP", label, smallPx);
     Draw(kFontSection, left + Wide(kFontSection, "LAP ", smallPx), row1, lapNumber, d.lap > 0 ? text : blank, smallPx);
     {
         const float gw = Wide(kFontSection, gate, smallPx), gx = right - gw;
-        const uint32_t gColor = d.lap > 0 && !d.valid ? Rgba(255, 176, 64, 1.0f) : kAccentHot;
-        Draw(kFontSection, gx - Wide(kFontSection, "G ", smallPx), row1, "G", gColor, smallPx);
+        const uint32_t gColor = d.lap > 0 && !d.valid ? amber : kAccentHot;
+        Draw(kFontSection, gx - Wide(kFontSection, "GATE ", smallPx), row1, "GATE", gColor, smallPx);
         Draw(kFontSection, gx, row1, gate, d.lap > 0 ? text : blank, smallPx);
     }
     // Row 2: this lap's time, bigPx (gold for a moment when one ends; grey if it missed a gate), and
-    // the live gap in a tagPx (green ahead, red behind).
+    // the live gap in a tagPx (green ahead, red behind). A lap that ended over the finish line with a
+    // gate missed: INVALID LAP TIME in amber for that moment, instead.
     const float row2 = l.y + U(25);
-    uint32_t curColor = d.current < 0 ? blank : text;
-    if (d.finished)
-        curColor = d.valid ? Rgba(255, 210, 90, 1.0f) : label;
-    else if (!d.valid)
-        curColor = label;
-    Draw(kFontTimer, left, row2, cur, curColor, bigPx);
-    {
-        const float tw = Wide(kFontTimer, gap, tagPx), pad = U(7);
+    if (d.finished && !d.valid) {
+        Draw(kFontSection, left, std::round(row2 + (bigPx - tagPx) * 0.5f), "INVALID LAP TIME", amber, tagPx);
+    } else {
+        uint32_t curColor = d.current < 0 ? blank : text;
+        if (d.finished)
+            curColor = Rgba(255, 210, 90, 1.0f);
+        else if (!d.valid)
+            curColor = label;
+        Draw(kFontTimer, left, row2, cur, curColor, bigPx);
+        const bool pausedTag = d.paused && d.lap > 0 && !d.finished;
+        const FontId tagFont = pausedTag ? kFontSection : kFontTimer;  // (a word: the labels' letters)
+        const float tw = Wide(tagFont, gap, tagPx), pad = U(7);
         const float bw = tw + 2 * pad, bh = std::round(tagPx * 1.15f);
         const float bx = right - bw, by = std::round(row2 + (bigPx - bh) * 0.5f);
         uint32_t back = Rgba(255, 255, 255, 0.07f), fore = blank;
-        if (d.haveGap && d.gap < 0) {
+        if (pausedTag) {
+            fore = text;
+        } else if (d.haveGap && d.gap < 0) {
             back = Rgba(60, 200, 110, 0.22f);
             fore = Rgba(110, 230, 150, 1.0f);
         } else if (d.haveGap && d.gap > 0) {
@@ -4885,7 +4952,7 @@ void LapTimerFrame(HWND window, double now)
             fore = text;
         }
         RoundedRect(bx, by, bw, bh, U(4), back);
-        Draw(kFontTimer, bx + pad, std::round(by + (bh - tagPx) * 0.5f), gap, fore, tagPx);
+        Draw(tagFont, bx + pad, std::round(by + (bh - tagPx) * 0.5f), gap, fore, tagPx);
     }
     // Row 3: PACE 1:01.80 ... BEST 1:01.26.
     const float row3 = l.y + U(62);
@@ -4926,6 +4993,10 @@ void OverlayGameKeyDown(int vk, bool repeat)
     g_keyMessages = true;
     if (vk == VK_ESCAPE && !repeat && !g_menuOpen.load(std::memory_order_relaxed))
         ++g_gameEscapes;
+    // (No scan codes here: Left and Right Shift or Ctrl alike.)
+    if (!repeat && !g_menuOpen.load(std::memory_order_relaxed) && g_pauseVk.load(std::memory_order_relaxed) != 0 &&
+        static_cast<unsigned>(vk) == g_pauseVk.load(std::memory_order_relaxed))
+        ++g_pausePresses;
 }
 
 bool HideGameOverlayNow(bool cursor)

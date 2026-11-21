@@ -19,6 +19,16 @@ void Update(double now, bool have, const double position[3]);
 // The game loaded another track: whatever was timed is the old one's.
 void NewTrack();
 
+// The game's pause key pressed (its own, from its settings): the game paused, or carried on. While it's
+// paused the lap's clock stops, and carries on from there. (If your bike goes on moving after a press
+// - pausing did nothing: an online race - it wasn't paused.)
+void PauseKey(double now);
+
+// What the game added to its own log (lastlog.txt; Update reads it as it grows): its "Resetting" - a
+// rejoin, a new race, on the same track (it loads the bikes again, not the track: nothing drawn says
+// so) - starts the laps and bests over; its "Loading terrain" (another track) is NewTrack.
+void NoteGameLog(const std::string& text);
+
 // The loaded track's heightmap spacing (the game's u_spacing; 0 unknown): only tracks whose own
 // (terrain.hf) is the same are looked for. Stadium tracks sit in the same few hundred metres: their
 // checkpoints lined up in order by chance and the timer jumped from track to track.
@@ -35,7 +45,9 @@ struct Display {
     bool        haveGap = false;
     double      gap = 0.0;         // seconds behind (+) or ahead (-) of your best lap at the last checkpoint
     bool        finished = false;  // showing a lap just finished
-    bool        valid = true;      // no timing gate missed (one is: the lap waits for it, the clock runs on)
+    bool        valid = true;      // no timing gate missed (running: one is - the Gate shown amber; finished:
+                                   // the lap ended over the finish line with one missed - an invalid lap time)
+    bool        paused = false;    // the game paused: the clock stopped
     double      best = -1.0;       // your best lap of this kind (seconds), -1 none
     int         gates = 0;         // timing gates in this lap
 };

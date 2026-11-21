@@ -41,6 +41,18 @@ bool Busy();
 // The setup last loaded or saved this session ("" none), to mark it in the list.
 const std::string& Current();
 
+// A key of the game's own, from its settings (its config file: "<setting>=(k)<key>"): a character ("t",
+// ",") or one of the game's key names ("F2", "Enter", "Right Ctrl", "Keypad 5", ...). False: not set,
+// or not a keyboard key (a controller's or the mouse's button); name: what the settings say either way.
+// (The game writes its settings when it quits: a key changed this session is read once it's restarted.)
+struct GameKey {
+    unsigned    vk = 0;          // its virtual key (Windows)
+    unsigned    scan = 0;        // its scan code, where two keys share the virtual key (Shift, Ctrl); 0 else
+    bool        extended = false;
+    std::string name;
+};
+bool ReadGameKey(const char* setting, GameKey& out);
+
 // For the menu's window procedure: a key message the mod posted itself (let through to the game
 // while the menu keeps the keyboard's to itself).
 bool Injected(long long lParam);

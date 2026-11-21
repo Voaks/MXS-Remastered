@@ -311,6 +311,11 @@ struct Timing {
     // The last position.
     bool                haveLast = false;
     double              lastX = 0, lastZ = 0, lastT = 0;
+    // The game paused (its pause key): since when, and your bike moving meanwhile (frames on end, since when).
+    bool                paused = false;
+    double              pausedAt = 0;
+    int                 movingFrames = 0;
+    double              stillAt = 0;   // the last frame it stood still
 };
 Timing g_t;
 
@@ -353,11 +358,15 @@ double Crossing(double ax, double az, double bx, double bz, const Gate& g, doubl
     if ((da < 0) == (db < 0))
         return -1;
     const double s = da / (da - db);  // along a->b
-    // Where on the line: within its middle +- half its width, and 10 units (3 m) more each side (gates
-    // you rode through were missed by the line's ends).
+    // Where on the line: within its middle +- its width, and 10 units (3 m) more each side. (The file's
+    // width is how far the line reaches each side of its middle, not end to end: a start straight's
+    // first gate reaches out to the start gate's end slots - Raceway Park 62 for slots -45..58, OMC 97
+    // for -76..76. Taken as end to end, gates you rode through were missed - 25.7 and 37.2 from the
+    // middle of gates 31.1 and 44.7 wide - and a gate further on was seldom crossed within it: the next
+    // missed was seldom shown.)
     const double cx = ax + rx * s - g.cx, cz = az + rz * s - g.cz;
     const double across = std::fabs((cx * -g.dz + cz * g.dx) / lg);
-    if (across > 0.5 * lg + margin)
+    if (across > lg + margin)
         return -1;
     return std::max(s, 1e-9);
 }
@@ -414,6 +423,36 @@ void StartLap(bool first, double at)
     g_t.lap += 1;
 }
 
+// The lap ends at gate (its finish line): shown for a moment - if valid, your best when it's quicker; if
+// not (a gate missed), its time only, marked invalid. The next lap from here if a lap starts where this
+// one ended (round a loop); else (a straight run, one track's laps from checkpoint 3 to 20) from
+// crossing its start again.
+void EndLap(int gate, double at, bool valid)
+{
+    const Track& t = g_tracks[static_cast<size_t>(g_t.track)];
+    const double time = at - g_t.start;
+    BestLap& best = g_t.best[g_t.firstLap ? 0 : 1];
+    g_t.shownUntil = at + 4.0;
+    g_t.shownTime = time;
+    g_t.shownHaveGap = valid && best.have;
+    g_t.shownGap = g_t.shownHaveGap ? time - best.time : 0.0;
+    g_t.shownValid = valid;
+    g_t.shownLap = g_t.lap;
+    g_t.shownSplit = g_t.firstLap ? g_t.pos + 1 : g_t.pos;  // (checkpoints passed: as Current counts them)
+    if (valid && (!best.have || time < best.time)) {
+        best.have = true;
+        best.time = time;
+        best.splits = g_t.splits;
+    }
+    const long long cs = static_cast<long long>(std::floor(time * 100.0 + 1e-6));  // (hundredths, cut: as the panel shows it)
+    Log("lap timer: lap %d on %s: %lld:%02lld.%02lld%s", g_t.lap, t.name.c_str(), cs / 6000, (cs / 100) % 60, cs % 100,
+        valid ? "" : " (invalid: a timing gate missed)");
+    if (gate == t.normal.front())
+        StartLap(false, at);
+    else
+        g_t.running = false;
+}
+
 void Passed(int gate, double at, bool exact)
 {
     const Track& t = g_tracks[static_cast<size_t>(g_t.track)];
@@ -440,14 +479,20 @@ void Passed(int gate, double at, bool exact)
             const int missed = g_t.firstLap ? g_t.pos + 2 : g_t.pos + 1;  // (as the panel counts gates)
             if (g_t.pending < 0) {
                 const Gate& mg = t.gates[static_cast<size_t>(seq[static_cast<size_t>(g_t.pos + 1)])];
-                Log("lap timer: lap %d missed timing gate G%d (checkpoint %d, %.1f wide): the clock runs on till it's crossed; "
+                Log("lap timer: lap %d missed timing gate G%d (checkpoint %d, reaching %.1f each side of its middle): shown amber till it's crossed; "
                     "the closest you came to its middle %.1f", g_t.lap, missed, seq[static_cast<size_t>(g_t.pos + 1)],
                     std::sqrt(mg.dx * mg.dx + mg.dz * mg.dz), g_t.nearest);
             }
-            if (i + 1 == count)
-                Log("lap timer: the finish line crossed with G%d missed: no lap, the clock runs on", missed);
             g_t.pending = g_t.pos + 1;
             break;
+        }
+        // The finish line crossed with a gate missed (the Gate shown amber): the lap ends there, timed but
+        // invalid (not your best, no gap), and the next starts - no going back for the missed gate.
+        // (Not before any gate of the lap: a first lap from the gate can cross the finish line first.)
+        if (gate == seq.back() && g_t.pending >= 0) {
+            const int missed = g_t.firstLap ? g_t.pending + 1 : g_t.pending;
+            Log("lap timer: the finish line crossed with G%d missed: lap %d ends, an invalid lap time", missed, g_t.lap);
+            EndLap(gate, at, false);
         }
         return;
     }
@@ -458,29 +503,7 @@ void Passed(int gate, double at, bool exact)
     g_t.splits[static_cast<size_t>(found)] = at - g_t.start;
     if (found + 1 < static_cast<int>(seq.size()))
         return;
-    // The lap's done.
-    const double time = at - g_t.start;
-    BestLap& best = g_t.best[g_t.firstLap ? 0 : 1];
-    g_t.shownUntil = at + 4.0;
-    g_t.shownTime = time;
-    g_t.shownHaveGap = best.have;
-    g_t.shownGap = best.have ? time - best.time : 0.0;
-    g_t.shownValid = true;  // (every gate crossed, in order: else it's no lap)
-    g_t.shownLap = g_t.lap;
-    g_t.shownSplit = g_t.firstLap ? found + 1 : found;  // (checkpoints passed: as Current counts them)
-    if (!best.have || time < best.time) {
-        best.have = true;
-        best.time = time;
-        best.splits = g_t.splits;
-    }
-    const long long cs = static_cast<long long>(std::floor(time * 100.0 + 1e-6));  // (hundredths, cut: as the panel shows it)
-    Log("lap timer: lap %d on %s: %lld:%02lld.%02lld", g_t.lap, t.name.c_str(), cs / 6000, (cs / 100) % 60, cs % 100);
-    // The next lap from here if a lap starts where this one ended (round a loop); else (a straight
-    // run, one track's laps from checkpoint 3 to 20) from crossing its start again.
-    if (gate == t.normal.front())
-        StartLap(false, at);
-    else
-        g_t.running = false;
+    EndLap(gate, at, true);  // (every gate crossed, in order)
 }
 
 // Standing in one of a track's start gate slots (within 3 units of one: they're 4 apart).
@@ -527,9 +550,111 @@ void NewTrack()
     g_t = Timing{};
 }
 
+namespace {
+// Carrying on after a pause from at: the lap's clock (and a finished lap's moment shown) moved on by the
+// time paused, so it carries on where it stopped.
+void Resume(double at)
+{
+    const double paused = std::max(0.0, at - g_t.pausedAt);
+    g_t.start += paused;
+    if (g_t.shownUntil > g_t.pausedAt)
+        g_t.shownUntil += paused;
+    g_t.paused = false;
+    Log("lap timer: the game carries on after %.1f s paused: the clock carries on", paused);
+}
+}  // namespace
+
+void PauseKey(double now)
+{
+    if (g_t.paused) {
+        Resume(now);
+        return;
+    }
+    g_t.paused = true;
+    g_t.pausedAt = now;
+    g_t.movingFrames = 0;
+    g_t.stillAt = now;
+    Log("lap timer: the game's pause key: the clock stopped");
+}
+
+// The game reset the session on the same track (rejoined, a new race): the laps and your bests start
+// over; the track stays known.
+void SessionReset()
+{
+    const int track = g_t.track;
+    const bool recheck = g_t.recheck;
+    g_t = Timing{};
+    g_t.track = track;
+    g_t.recheck = recheck;
+}
+
+void NoteGameLog(const std::string& text)
+{
+    // (Its lines: "[h:mm:ss.cc] Resetting" - rejoining the track, or a new race on it: the game
+    // deallocates and loads the bikes again, but not the track, and nothing it draws says so;
+    // "Loading terrain" - another track.)
+    if (text.find("] Loading terrain") != std::string::npos) {
+        Log("lap timer: the game's log says a track is loading: the laps start over");
+        NewTrack();
+    } else if (text.find("] Resetting") != std::string::npos) {
+        Log("lap timer: the game's log says it reset (a rejoin or a new race): the laps and bests start over");
+        SessionReset();
+    }
+}
+
+namespace {
+// The game's own log (lastlog.txt in its personal folder), read as it grows: twice a second its size,
+// and what was added since.
+struct GameLogWatch {
+    bool               started = false;
+    unsigned long long size = 0;
+    double             checkedAt = -1e9;
+};
+GameLogWatch g_gameLog;
+
+void PollGameLog(double now)
+{
+    if (g_testTracks || now - g_gameLog.checkedAt < 0.5)
+        return;
+    g_gameLog.checkedAt = now;
+    const wchar_t* folder = paths::PersonalFolder();
+    if (!folder || !folder[0])
+        return;
+    const std::filesystem::path path = std::filesystem::path(folder) / L"lastlog.txt";
+    std::error_code error;
+    const unsigned long long size = std::filesystem::file_size(path, error);
+    if (error)
+        return;
+    if (!g_gameLog.started) {  // (what it says already was before now)
+        g_gameLog.started = true;
+        g_gameLog.size = size;
+        return;
+    }
+    if (size < g_gameLog.size)
+        g_gameLog.size = 0;  // (a new log: the game started again)
+    if (size == g_gameLog.size)
+        return;
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+        return;
+    const unsigned long long from = std::max(g_gameLog.size, size > (1u << 20) ? size - (1u << 20) : 0ull);
+    file.seekg(static_cast<std::streamoff>(from));
+    std::string text(static_cast<size_t>(size - from), '\0');
+    file.read(&text[0], static_cast<std::streamsize>(text.size()));
+    text.resize(static_cast<size_t>(std::max<std::streamsize>(file.gcount(), 0)));
+    // (Up to its last whole line: the rest is read next time.)
+    const size_t end = text.rfind('\n');
+    if (end == std::string::npos)
+        return;
+    g_gameLog.size = from + end + 1;
+    NoteGameLog(text.substr(0, end + 1));
+}
+}  // namespace
+
 void Update(double now, bool have, const double position[3])
 {
     StartLoading();
+    PollGameLog(now);
     if (!g_taken && g_loadDone.load()) {
         std::lock_guard<std::mutex> lock(g_loadedMutex);
         g_tracks = std::move(g_loaded);
@@ -553,6 +678,24 @@ void Update(double now, bool have, const double position[3])
     g_t.lastZ = z;
     g_t.lastT = now;
     const bool still = step < 0.02;
+    // Paused, your bike moving on (4 frames on end: a frame stepped while paused is one): at once after the
+    // pause key - pausing did nothing (an online race): it never was; later - the game carried on some
+    // other way (its menu): from the last moment it stood still.
+    if (g_t.paused) {
+        if (step > 0.05) {
+            if (++g_t.movingFrames >= 4) {
+                if (g_t.stillAt - g_t.pausedAt < 0.25) {
+                    g_t.paused = false;
+                    Log("lap timer: your bike went on moving after the pause key: the game wasn't paused (the clock ran on)");
+                } else {
+                    Resume(g_t.stillAt);
+                }
+            }
+        } else {
+            g_t.movingFrames = 0;
+            g_t.stillAt = now;
+        }
+    }
     // A jump (a reset, a respawn, a new session): no line crossed on the way. (The lap goes on: its
     // gates still have to be crossed in order.) After a while not known, as far as riding goes: 100
     // units (30 m) a second.
@@ -704,6 +847,10 @@ Display Current(double now)
     Display d;
     if (g_t.track < 0)
         return d;
+    // (Paused: everything as it stood when the game paused.)
+    d.paused = g_t.paused;
+    if (g_t.paused)
+        now = g_t.pausedAt;
     const Track& t = g_tracks[static_cast<size_t>(g_t.track)];
     d.track = true;
     d.trackName = t.name;

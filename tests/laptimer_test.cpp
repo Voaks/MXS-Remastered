@@ -24,7 +24,8 @@ void Log(const char* format, ...)
 namespace paths {
 static std::wstring g_folder;
 const wchar_t* GameFolder() { return g_folder.c_str(); }
-const wchar_t* PersonalFolder() { return L""; }
+static std::wstring g_personal;
+const wchar_t* PersonalFolder() { return g_personal.c_str(); }
 }  // namespace paths
 }  // namespace mxcam
 
@@ -173,9 +174,8 @@ int main(int argc, char** argv)
     Check(g_last.haveGap && std::fabs(g_last.gap + 8.0) < 0.03, "its gap at the line: 8.00 s ahead of lap 2");
 
     // Lap 4 at 25 again, but cutting across from the bottom to the top, missing gate 2 (checkpoint 1):
-    // as the game counts a lap, every gate in order - the missed one isn't skipped, the finish line
-    // crossed without it is no lap, and the clock runs on into the next time round, till the missed
-    // gate is crossed and the rest after it.
+    // the missed one isn't skipped (the Gate amber), and the finish line crossed without it ends the
+    // lap - timed, but an invalid lap time (not a best) - and the next lap starts there.
     {
         const double start = 825.0 + 1600.0;
         Ride(r, start + 100.0, 25.0);  // to x 25 on the bottom (past checkpoint 0)
@@ -190,19 +190,21 @@ int main(int argc, char** argv)
         Ride(r, start + 600.0, 25.0);  // past gate 4 on the left
         Check(g_last.lap == 4 && !g_last.valid && g_last.split == 1, "a gate missed: shown as missed, the lap stays at the gate before it (G1)");
         Ride(r, start + 800.0 + 0.5, 25.0);  // over the finish line, 21 s in
-        Check(!g_last.finished && g_last.lap == 4 && g_last.current > 20.9, "the finish line crossed with a gate missed: no lap, the clock runs on");
-        printf("    lap 4 over the finish line with gate 2 missed: still running, %.3f s\n", g_last.current);
-        // On round at 20 (40 s): gate 2 this time, and the rest, to the finish line: lap 4 done, 61 s.
-        Ride(r, start + 1100.0 + 1.0, 20.0);
-        Check(g_last.lap == 4 && g_last.valid && g_last.split == 2, "the missed gate crossed next time round: the lap goes on from it");
+        Check(g_last.finished && g_last.lap == 4 && !g_last.valid && g_last.current > 20.9 && g_last.current < 21.1,
+              "the finish line crossed with a gate missed: the lap ends there, an invalid lap time");
+        Check(!g_last.haveGap && std::fabs(g_last.best - 32.0) < 0.03, "an invalid lap is never your best, nor measured against it");
+        printf("    lap 4 over the finish line with gate 2 missed: invalid, %.3f s\n", g_last.current);
+        // On round at 20 (40 s): lap 5, every gate this time.
+        Ride(r, start + 800.0 + 300.0 + 1.0, 20.0);
+        Check(g_last.lap == 5 && g_last.valid && g_last.split == 2, "and the next lap starts at the finish line, from scratch");
         Ride(r, start + 1600.0 + 0.5, 20.0);
-        Check(g_last.finished && g_last.lap == 4 && std::fabs(g_last.current - 61.0) < 0.05, "and ends at the next finish line: 61 s, the clock never reset");
-        printf("    lap 4 %.3f s\n", g_last.current);
+        Check(g_last.finished && g_last.lap == 5 && g_last.valid && std::fabs(g_last.current - 40.0) < 0.05, "lap 5: 40.00 s");
+        printf("    lap 5 %.3f s\n", g_last.current);
     }
-    // Lap 5 at 20: measured against lap 3 (32 s). (Lap 4 ended at 825 + 3200.)
+    // Lap 6 at 20: measured against lap 3 (32 s). (Lap 5 ended at 825 + 3200.)
     Ride(r, 825.0 + 3200.0 + 25.0 + 1.0, 20.0);
     Ride(r, 825.0 + 3200.0 + 100.0, 20.0);
-    Check(g_last.lap == 5 && g_last.haveGap && std::fabs(g_last.gap - 0.25) < 0.03, "lap 5 is measured against lap 3, the best");
+    Check(g_last.lap == 6 && g_last.haveGap && std::fabs(g_last.gap - 0.25) < 0.03, "lap 6 is measured against lap 3, the best");
     Check(g_last.trackName == "Square" && std::fabs(g_last.best - 32.0) < 0.03,
           "riding up the decoy's checkpoints every lap (8 of them in order by now) never took the timer away, nor the best");
     Check(g_last.gates == 5, "the lap's timing gates: 5 (G1 to G5)");
@@ -216,6 +218,78 @@ int main(int argc, char** argv)
     r.d = 5.0;
     Ride(r, 5.0 + 50.0, 20.0);
     Check(g_last.lap == 1, "and leaving it again is lap 1");
+    // Rejoining the same track (the game's log: "Resetting", the bikes loaded again, not the track;
+    // nothing drawn says so): the lap running and the bests start over, the track stays known.
+    {
+        Ride(r, 825.0 - 100.0, 20.0);
+        laptimer::NoteGameLog("[2:04:58.84] Resetting\n[2:04:58.85] Deallocating bikes\n[2:04:58.85] Loading bikes\n");
+        r.t += 0.1;
+        double p[3];
+        PositionAt(r.d, p);
+        Frame(r, p);
+        Check(g_last.track && g_last.trackName == "Square" && g_last.lap == 0 && g_last.current < 0 && g_last.best < 0,
+              "rejoined (the game's log says Resetting): the lap and the bests start over, the track still known");
+        Ride(r, 825.0 + 300.0 + 1.0, 20.0);
+        Check(g_last.lap == 1 && g_last.split == 2, "and the finish line starts lap 1");
+    }
+    // The game paused (its pause key): the clock stops while it's paused, and carries on from there.
+    {
+        Ride(r, r.d + 40.0, 20.0);
+        const double before = g_last.current;
+        laptimer::PauseKey(r.t);
+        double p[3];
+        PositionAt(r.d, p);
+        for (int i = 0; i < 500; ++i) {  // (5 s paused: your bike standing still)
+            r.t += 0.01;
+            Frame(r, p);
+        }
+        Check(g_last.paused && g_last.lap == 1 && std::fabs(g_last.current - before) < 0.02, "the game paused: the lap's clock stopped");
+        laptimer::PauseKey(r.t);
+        Ride(r, r.d + 20.0, 20.0);  // (1 s on)
+        Check(!g_last.paused && std::fabs(g_last.current - (before + 1.0)) < 0.05, "the pause key again: the clock carries on from where it stopped");
+        // Pressed where pausing does nothing (an online race): your bike rides on - no time taken off.
+        const double c0 = g_last.current;
+        laptimer::PauseKey(r.t);
+        Ride(r, r.d + 20.0, 20.0);
+        Check(!g_last.paused && std::fabs(g_last.current - (c0 + 1.0)) < 0.05, "the pause key where it does nothing: the clock runs on");
+        // Paused, carried on some other way (the game's menu): the clock carries on when your bike moves.
+        const double c1 = g_last.current;
+        laptimer::PauseKey(r.t);
+        PositionAt(r.d, p);
+        for (int i = 0; i < 300; ++i) {
+            r.t += 0.01;
+            Frame(r, p);
+        }
+        Ride(r, r.d + 20.0, 20.0);
+        Check(!g_last.paused && std::fabs(g_last.current - (c1 + 1.0)) < 0.06,
+              "paused, then carried on without the pause key: the clock carries on when your bike moves");
+        printf("    paused 5 s and 3 s: the lap's clock %.3f s after 3 s of riding\n", g_last.current - before);
+    }
+    // The game's log itself (lastlog.txt in its personal folder), read as it grows: what it said before
+    // isn't taken; a "Resetting" added later is - only once its line is whole.
+    {
+        paths::g_personal = (std::filesystem::temp_directory_path() / L"laptimer_test_personal").wstring() + L"\\";
+        std::filesystem::create_directories(paths::g_personal);
+        const std::wstring logPath = paths::g_personal + L"lastlog.txt";
+        const auto Write = [&](const char* text, bool append) {
+            FILE* f = _wfopen(logPath.c_str(), append ? L"ab" : L"wb");
+            fputs(text, f);
+            fclose(f);
+        };
+        Write("[1:46:32.14] Resetting\n[1:46:32.22] Loading terrain\n", false);
+        laptimer::g_testTracks = false;  // (the log is read only outside tests otherwise)
+        Ride(r, r.d + 300.0, 20.0);       // (the log looked at: what's in it already left alone)
+        const int lapBefore = g_last.lap;
+        Check(g_last.track && lapBefore >= 1, "the game's log as it was before isn't taken for a reset");
+        Write("[2:04:58.84] Resett", true);  // (half a line so far)
+        Ride(r, r.d + 20.0, 20.0);
+        Check(g_last.lap == lapBefore, "half a line in the game's log: not yet");
+        Write("ing\n[2:04:58.85] Loading bikes\n", true);
+        Ride(r, r.d + 20.0, 20.0);
+        Check(g_last.track && g_last.lap == 0 && g_last.best < 0, "a Resetting added to the game's log: the laps start over");
+        laptimer::g_testTracks = true;
+        paths::g_personal.clear();
+    }
 
     // Telling the track from its checkpoints only (no start gate): a fresh session on the square,
     // three checkpoints in order.
@@ -364,7 +438,10 @@ int main(int argc, char** argv)
         // Each track ridden: from checkpoint to checkpoint in its lap's order, three times round, through
         // each the way a rider goes (from 6 units before its middle to 2 past it, along its way through;
         // straight on between them), 25 units a second.
-        int timed = 0, notTold = 0;
+        // (Then again through each gate near its end - 85% of the way out from its middle, each side in
+        // turn - where riding through gates was missed when the file's width was taken end to end.)
+        for (const double out : { 0.0, 0.85 }) {
+        int timed = 0, notTold = 0, missedShown = 0;
         for (const auto& t : tracks) {
             if (t.normal.front() != t.normal.back())
                 continue;  // (a straight run, not a loop: Straight Rhythm)
@@ -379,8 +456,10 @@ int main(int argc, char** argv)
                 for (size_t i = lap ? 1 : 0; i < t.normal.size(); ++i) {
                     const laptimer::Gate& g = t.gates[static_cast<size_t>(t.normal[i])];
                     const double lv = std::sqrt(g.dx * g.dx + g.dz * g.dz);
-                    path.push_back({ g.cx - 6.0 * g.dx / lv, g.cz - 6.0 * g.dz / lv });
-                    path.push_back({ g.cx + 2.0 * g.dx / lv, g.cz + 2.0 * g.dz / lv });
+                    const double side = (i % 2 ? 1.0 : -1.0) * out;  // (along its line: -g.dz, g.dx, as long as it reaches)
+                    const double mx = g.cx - g.dz * side, mz = g.cz + g.dx * side;
+                    path.push_back({ mx - 6.0 * g.dx / lv, mz - 6.0 * g.dz / lv });
+                    path.push_back({ mx + 2.0 * g.dx / lv, mz + 2.0 * g.dz / lv });
                 }
             double now = 0;
             int laps = 0;
@@ -397,6 +476,8 @@ int main(int argc, char** argv)
                     const laptimer::Display d = laptimer::Current(now);
                     if (d.finished && d.valid && d.lap > laps)
                         laps = d.lap;
+                    if (!d.finished && d.lap > 0 && !d.valid)
+                        ++missedShown;
                 }
             }
             if (laptimer::g_t.track < 0)
@@ -406,8 +487,11 @@ int main(int argc, char** argv)
             else
                 printf("      %s: %d whole laps timed (track %s)\n", t.name.c_str(), laps, laptimer::g_t.track < 0 ? "not told" : "told");
         }
-        printf("    %d tracks ridden round: %d with 2 whole laps timed, %d never told\n", static_cast<int>(tracks.size()), timed, notTold);
-        Check(timed >= static_cast<int>(tracks.size()) - 3, "riding round each of the game folder's tracks, whole laps are timed");
+        printf("    %d tracks ridden round%s: %d with 2 whole laps timed, %d never told; %d frames showing a gate missed\n",
+               static_cast<int>(tracks.size()), out > 0 ? " through each gate 85% out from its middle" : "", timed, notTold, missedShown);
+        Check(timed >= static_cast<int>(tracks.size()) - 3, out > 0 ? "riding through each gate near its end, whole laps are timed"
+                                                                    : "riding round each of the game folder's tracks, whole laps are timed");
+        }
     }
 
     printf(g_failed ? "%d check(s) FAILED\n" : "All checks passed\n", g_failed);

@@ -104,44 +104,120 @@ std::string LogSince(long long from)
 }
 
 #ifdef _WIN32
-// The game's console key (its settings: console_key=(k)<key>), and the character it types.
-void ConsoleKey(UINT& vk, wchar_t& ch)
-{
-    vk = 'T';
-    ch = L't';
-    std::wstring path = std::wstring(paths::PersonalFolder()) + L"config";
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f)
-        return;
-    char line[256];
-    while (fgets(line, sizeof line, f)) {
-        if (strncmp(line, "console_key=(k)", 15) != 0)
-            continue;
-        const char* key = line + 15;
-        if (key[0] && (key[1] == '\r' || key[1] == '\n' || key[1] == '\0')) {
-            const SHORT scan = VkKeyScanA(key[0]);
-            if (scan != -1) {
-                vk = scan & 0xFF;
-                ch = static_cast<wchar_t>(static_cast<unsigned char>(key[0]));
-            }
-        } else {
-            Log("setups: the console key \"%.*s\" isn't a single key: using T", static_cast<int>(strcspn(key, "\r\n")), key);
-        }
-        break;
-    }
-    fclose(f);
-}
-
 // A key pressed and let go: its key down and up only. The game's own message loop translates the key
 // down into its character (TranslateMessage), as for a key on the keyboard - a character posted along
 // with it arrived twice. (The first try typed "/writesetup test_1/writesetup test-1": every character
 // posted, then each again as translated - with Shift up there, '_' as '-' - and the game wrote a file
-// "writesetup test-1" in a new folder "test_1".)
-void Press(HWND window, UINT vk)
+// "writesetup test-1" in a new folder "test_1".) Its scan code and extended bit as the keyboard sends
+// them (a right Ctrl, the keypad's Enter, the arrows).
+void Press(HWND window, UINT vk, UINT scan = 0, bool extended = false)
 {
-    const UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    PostMessageW(window, WM_KEYDOWN, vk, static_cast<LPARAM>(1 | scan << 16 | kMarker));
-    PostMessageW(window, WM_KEYUP, vk, static_cast<LPARAM>(1 | scan << 16 | kMarker | 0xC0000000ll));
+    if (!scan)
+        scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    const LPARAM ext = extended ? (1ll << 24) : 0;
+    PostMessageW(window, WM_KEYDOWN, vk, static_cast<LPARAM>(1 | scan << 16 | kMarker) | ext);
+    PostMessageW(window, WM_KEYUP, vk, static_cast<LPARAM>(1 | scan << 16 | kMarker | 0xC0000000ll) | ext);
+}
+#endif
+}  // namespace
+
+// The game's keys by the names its settings give them (its own table of key names): the key's virtual
+// key, its scan code where two keys share one (Shift, Ctrl), and whether it's an extended key.
+bool ReadGameKey(const char* setting, GameKey& out)
+{
+    out = GameKey{};
+    const std::wstring path = std::wstring(paths::PersonalFolder()) + L"config";
+    FILE* f = nullptr;
+#ifdef _WIN32
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0)
+        f = nullptr;
+#else
+    f = fopen(std::string(path.begin(), path.end()).c_str(), "rb");
+#endif
+    if (!f)
+        return false;
+    const std::string prefix = std::string(setting) + "=";
+    char line[256];
+    bool found = false;
+    while (!found && fgets(line, sizeof line, f)) {
+        if (strncmp(line, prefix.c_str(), prefix.size()) != 0)
+            continue;
+        found = true;
+        std::string value = line + prefix.size();
+        while (!value.empty() && (value.back() == '\r' || value.back() == '\n'))
+            value.pop_back();
+        out.name = value;
+    }
+    fclose(f);
+    if (!found)
+        return false;
+    // "(k)<key>": a key or a button; else an axis ("(0.06,0.94)<device> axis 5").
+    if (out.name.rfind("(k)", 0) != 0)
+        return false;
+    out.name.erase(0, 3);
+#ifdef _WIN32
+    if (out.name.size() == 1) {
+        const SHORT scan = VkKeyScanA(out.name[0]);
+        if (scan == -1)
+            return false;
+        out.vk = static_cast<unsigned>(scan & 0xFF);
+        return true;
+    }
+    struct Named { const char* name; unsigned vk; unsigned scan; bool extended; };
+    static const Named kNames[] = {
+        { "Esc", VK_ESCAPE, 0, false },        { "Backspace", VK_BACK, 0, false },      { "Tab", VK_TAB, 0, false },
+        { "Enter", VK_RETURN, 0, false },      { "Left Ctrl", VK_CONTROL, 0x1D, false }, { "Right Ctrl", VK_CONTROL, 0x1D, true },
+        { "Left Shift", VK_SHIFT, 0x2A, false }, { "Right Shift", VK_SHIFT, 0x36, false }, { "Space", VK_SPACE, 0, false },
+        { "Caps Lock", VK_CAPITAL, 0, false }, { "Insert", VK_INSERT, 0, true },        { "Delete", VK_DELETE, 0, true },
+        { "Home", VK_HOME, 0, true },          { "End", VK_END, 0, true },              { "Page Up", VK_PRIOR, 0, true },
+        { "Page Down", VK_NEXT, 0, true },     { "Up", VK_UP, 0, true },                { "Down", VK_DOWN, 0, true },
+        { "Left", VK_LEFT, 0, true },          { "Right", VK_RIGHT, 0, true },          { "Pause", VK_PAUSE, 0, false },
+        { "Num Lock", VK_NUMLOCK, 0, true },   { "Keypad /", VK_DIVIDE, 0, true },      { "Keypad *", VK_MULTIPLY, 0, false },
+        { "Keypad -", VK_SUBTRACT, 0, false }, { "Keypad +", VK_ADD, 0, false },        { "Keypad Enter", VK_RETURN, 0, true },
+        { "Keypad .", VK_DECIMAL, 0, false },
+    };
+    for (const Named& n : kNames)
+        if (out.name == n.name) {
+            out.vk = n.vk;
+            out.scan = n.scan;
+            out.extended = n.extended;
+            return true;
+        }
+    if (out.name.size() >= 2 && out.name.size() <= 3 && out.name[0] == 'F' && isdigit(static_cast<unsigned char>(out.name[1]))) {
+        const int n = atoi(out.name.c_str() + 1);
+        if (n >= 1 && n <= 12) {
+            out.vk = VK_F1 + (n - 1);
+            return true;
+        }
+    }
+    if (out.name.rfind("Keypad ", 0) == 0 && out.name.size() == 8 && isdigit(static_cast<unsigned char>(out.name[7]))) {
+        out.vk = VK_NUMPAD0 + (out.name[7] - '0');
+        return true;
+    }
+#endif
+    return false;  // (a controller's button, a mouse button: not a key the mod can press)
+}
+
+namespace {
+
+#ifdef _WIN32
+// The game's console key (its settings: console_key=(k)<key>; the game writes them when it quits, so a
+// key changed this session counts once the game has been restarted). T, the game's own, if it can't be
+// told.
+GameKey ConsoleKey()
+{
+    GameKey key;
+    if (ReadGameKey("console_key", key))
+        return key;
+    static std::string told;
+    if (key.name != told) {
+        told = key.name;
+        Log("setups: the console key \"%s\" isn't a keyboard key the mod can press: using T", key.name.c_str());
+    }
+    key = GameKey{};
+    key.vk = 'T';
+    key.name = "t";
+    return key;
 }
 
 // Text: its characters alone (no key downs to be translated again), exactly as written - Shift and
@@ -302,10 +378,13 @@ void Update(void* windowHandle, double now)
     const auto Took = [&]() { g_stepAt = now; g_stepFrame = g_frame; };
     switch (g_step) {
     case Step::Console: {  // the console opened
-        UINT vk;
-        wchar_t ch;
-        ConsoleKey(vk, ch);
-        Press(window, vk);
+        const GameKey key = ConsoleKey();
+        static std::string logged;
+        if (key.name != logged) {
+            logged = key.name;
+            Log("setups: the game's console key: \"%s\"", key.name.c_str());
+        }
+        Press(window, key.vk, key.scan, key.extended);
         g_step = Step::Type;
         Took();
         break;
