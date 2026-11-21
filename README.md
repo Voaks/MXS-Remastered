@@ -2,7 +2,7 @@
 
 Open source and purely OpenGL based.
 
-**Discord:** [discord.gg/YvkUHCMFy6](https://discord.gg/YvkUHCMFy6)
+**Discord:** [discord.gg/fnaDTvdgrP](https://discord.gg/fnaDTvdgrP)
 
 > [!WARNING]
 > **Work in progress.** Expect bugs and changes between updates.
