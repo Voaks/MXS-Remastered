@@ -52,9 +52,9 @@ At the bottom left of the menu, **PRESET 1 / 2 / 3** switches between three sett
 
 ### Preset codes
 
-Share your setup without sending files. On the **FIRST PERSON** tab, **COPY FIRST PERSON CODE** copies your camera settings as one line of text (it starts with `MXS-REMASTERED-CAM-`); on the **GRAPHICS** tab, **COPY GRAPHICS CODE** does the same for your graphics (`MXS-REMASTERED-GFX-`). Paste it in Discord or anywhere.
+Share your setup without sending files. Press **COPY PRESET** (on any tab) and choose **FIRST PERSON** or **GRAPHICS**: that part of the preset you're on is copied as one line of text (a first person code starts with `MXS-REMASTERED-CAM-`, a graphics code with `MXS-REMASTERED-GFX-`). Paste it in Discord or anywhere.
 
-To load someone's code, copy it (the whole message is fine), open the menu and press **PASTE CODE**, from any tab. It loads into the preset you're on: a first person code changes only your first person settings and a graphics code only your graphics, and everything else stays yours (keybinds are never in a code). Press **SAVE** to keep it, or quit without saving to go back to how that preset was.
+To load someone's code, copy it (the whole message is fine), open the menu and press **PASTE PRESET**, from any tab. It loads into the preset you're on: a first person code changes only your first person settings and a graphics code only your graphics, and everything else stays yours (keybinds are never in a code). Press **SAVE** to keep it, or quit without saving to go back to how that preset was.
 
 | Key | What it does |
 |---|---|

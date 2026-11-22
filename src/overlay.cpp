@@ -1144,6 +1144,40 @@ void GlowRounded(float x, float y, float w, float h, float r, const GlowSpec& gl
     Corner(x + w - r, y + h - r, kDiscUM, kDiscVM, kDiscU1, kDiscV1);
 }
 
+// A rounded rectangle shaded top to bottom (its corners cut from the disc, as RoundedRect's). The
+// buttons' fill: drawn square inside their rounded border, its corners showed past the border's curve -
+// each corner looked cut off.
+void GradientRounded(float x, float y, float w, float h, float r, uint32_t top, uint32_t bottom)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    r = std::floor(std::fmin(r, std::fmin(w, h) * 0.5f));
+    const auto At = [&](float py) {
+        const float t = Clamp((py - y) / h, 0.0f, 1.0f);
+        uint32_t out = 0;
+        for (int shift = 0; shift < 32; shift += 8) {
+            const float a = static_cast<float>((top >> shift) & 0xFF), b = static_cast<float>((bottom >> shift) & 0xFF);
+            out |= static_cast<uint32_t>(a + (b - a) * t + 0.5f) << shift;
+        }
+        return out;
+    };
+    GradientV(x + r, y, w - 2 * r, h, top, bottom);
+    GradientV(x, y + r, r, h - 2 * r, At(y + r), At(y + h - r));
+    GradientV(x + w - r, y + r, r, h - 2 * r, At(y + r), At(y + h - r));
+    const auto Corner = [&](float x0, float y0, float u0, float v0, float u1, float v1) {
+        const float x1 = x0 + r, y1 = y0 + r;
+        const Vertex a{ x0, y0, u0, v0, At(y0) }, b{ x1, y0, u1, v0, At(y0) };
+        const Vertex c{ x1, y1, u1, v1, At(y1) }, d{ x0, y1, u0, v1, At(y1) };
+        g_batch.insert(g_batch.end(), { a, b, c, a, c, d });
+    };
+    if (r <= 0)
+        return;
+    Corner(x, y, kDiscU0, kDiscV0, kDiscUM, kDiscVM);
+    Corner(x + w - r, y, kDiscUM, kDiscV0, kDiscU1, kDiscVM);
+    Corner(x, y + h - r, kDiscU0, kDiscVM, kDiscUM, kDiscV1);
+    Corner(x + w - r, y + h - r, kDiscUM, kDiscVM, kDiscU1, kDiscV1);
+}
+
 float LineHeight(FontId font) { return g_fonts[font].lineHeight; }
 
 float TextWidth(FontId font, const char* text, float tracking)
@@ -1816,6 +1850,8 @@ struct PanelState {
     // DEFAULTS was pressed: asking first (0 CANCEL, 1 RESET highlighted). Too many lost their
     // settings to one click.
     bool   askDefaults  = false;
+    // COPY PRESET was pressed: asking which code (0 CANCEL, 1 FIRST PERSON, 2 GRAPHICS highlighted).
+    bool   askCopy      = false;
     double openedAt     = 0;  // when the menu last opened (the logo's light sweep counts from it)
     // Something just changed that only takes effect once the game restarts (the sound mods): saying
     // so, with an OK. restartText: what changed.
@@ -2183,6 +2219,7 @@ void ClosePanel()
     ClearSearch();
     g_panel.scrollDrag = false;
     g_panel.askDefaults = false;
+    g_panel.askCopy = false;
     g_panel.askRestart = false;
     g_panel.open = false;
     g_panel.dragging = -1;
@@ -3878,15 +3915,19 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
                              (g_panel.selected == buttonItem && in.activate);
         const bool focused = hot || g_panel.selected == buttonItem;
         const bool held = hot && in.down && g_panel.pressedItem == buttonItem;
-        const float r = S(4), b = std::fmax(1.0f, S(2));
+        // (Its fill rounded to fit inside the border: drawn square, its corners showed past the border's
+        // curve - every button's corners looked cut off.)
+        const float r = std::floor(std::fmax(S(4), 2.0f)), b = std::fmax(1.0f, S(2)), ri = std::fmax(r - b, 1.0f);
         if (primary) {
             RoundedRect(bx, by, bw, buttonH, r, focused ? Rgba(255, 96, 100, 1.0f) : Rgba(232, 52, 58, 1.0f));
-            GradientV(bx + b, by + b, bw - 2 * b, buttonH - 2 * b, held ? kAccent : (focused ? Rgba(236, 38, 44, 1.0f) : Rgba(214, 22, 30, 1.0f)),
-                      held ? kAccentDeep : Rgba(140, 8, 14, 1.0f));
+            GradientRounded(bx + b, by + b, bw - 2 * b, buttonH - 2 * b, ri,
+                            held ? kAccent : (focused ? Rgba(236, 38, 44, 1.0f) : Rgba(214, 22, 30, 1.0f)),
+                            held ? kAccentDeep : Rgba(140, 8, 14, 1.0f));
         } else {
             RoundedRect(bx, by, bw, buttonH, r, focused ? Rgba(176, 176, 182, 1.0f) : Rgba(88, 88, 94, 1.0f));
-            GradientV(bx + b, by + b, bw - 2 * b, buttonH - 2 * b, held ? Rgba(30, 30, 33, 1.0f) : (focused ? Rgba(54, 54, 58, 1.0f) : Rgba(42, 42, 46, 1.0f)),
-                      Rgba(18, 18, 20, 1.0f));
+            GradientRounded(bx + b, by + b, bw - 2 * b, buttonH - 2 * b, ri,
+                            held ? Rgba(30, 30, 33, 1.0f) : (focused ? Rgba(54, 54, 58, 1.0f) : Rgba(42, 42, 46, 1.0f)),
+                            Rgba(18, 18, 20, 1.0f));
         }
         const float labelW = TextWidth(kFontButton, label, 0);
         Text(kFontButton, std::round(bx + (bw - labelW) * 0.5f), by + std::round((buttonH - LineHeight(kFontButton)) * 0.5f), label,
@@ -3894,7 +3935,23 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
         return clicked;
     };
 
-    const float bigW = S(210), gap = S(16);
+    // The row under the box, laid out together: COPY PRESET and PASTE PRESET from the left, SAVE,
+    // DEFAULTS and (while something is changed) CANCEL from the right. Each at its usual width if they
+    // all fit; else all narrowed alike toward just their labels' (CANCEL, at a fixed place, lay over
+    // PASTE on a narrow menu).
+    const float gap = S(16), codeGap = S(12);
+    const auto Fit = [&](const char* label) { return std::round(TextWidth(kFontButton, label, 0) + S(28)); };
+    const float codeFit = std::fmax(Fit("COPY PRESET"), Fit("PASTE PRESET"));
+    const float bigFit = std::fmax(Fit("DEFAULTS"), Fit("SAVED")), cancelFit = Fit("CANCEL");
+    const float codePref = std::fmax(S(170), codeFit + S(12)), bigPref = std::fmax(S(210), bigFit), cancelPref = std::fmax(S(150), cancelFit);
+    const bool showCancel = g_panel.dirty;
+    const float fixedGaps = codeGap + gap + gap + (showCancel ? gap : 0.0f);
+    const float prefTotal = 2 * codePref + 2 * bigPref + (showCancel ? cancelPref : 0.0f) + fixedGaps;
+    const float minTotal = 2 * codeFit + 2 * bigFit + (showCancel ? cancelFit : 0.0f) + fixedGaps;
+    const float avail = boxR - boxX;
+    const float k = prefTotal <= avail ? 1.0f : Clamp((avail - minTotal) / std::fmax(prefTotal - minTotal, 1.0f), 0.0f, 1.0f);
+    const auto Width = [&](float fit, float pref) { return std::round(fit + (pref - fit) * k); };
+    const float codeW = Width(codeFit, codePref), bigW = Width(bigFit, bigPref), cancelW = Width(cancelFit, cancelPref);
     if (Button(saveItem, boxR - bigW, bigW, g_panel.dirty ? "SAVE" : "SAVED", g_panel.dirty,
                "Writes your settings and keybinds to MXS_REMASTERED.ini so they load next time.")) {
         if (SaveConfig()) {
@@ -3911,8 +3968,7 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
         g_panel.askChoice = 0;  // (CANCEL highlighted: Enter by mistake changes nothing)
     }
     // CANCEL: only while something is changed - every change since the last SAVE undone.
-    if (g_panel.dirty) {
-        const float cancelW = S(150);
+    if (showCancel) {
         if (Button(cancelItem, boxR - 2 * bigW - 2 * gap - cancelW, cancelW, "CANCEL", false,
                    "Undoes every change since you last pressed SAVE: all your settings, presets and keybinds go "
                    "back to what's in MXS_REMASTERED.ini.")) {
@@ -3926,35 +3982,21 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
     if (Button(closeItem, sideX, sideW, "CLOSE", false, "Closes the menu. Unsaved changes stay until you quit the game."))
         g_panel.closeRequest = true;
 
-    // Preset codes: COPY CODE / PASTE CODE (first person and graphics have a code each; on the other
-    // tabs only PASTE CODE shows).
+    // Preset codes: COPY PRESET (always there: it asks which code - first person or graphics) and
+    // PASTE PRESET. (COPY CODE was there only on the first person and graphics tabs, copying that tab's:
+    // confusing.)
     {
-        const float cwBtn = S(170);
-        const int codeTab = searching ? -1 : CodeOfTab(g_panel.tab);
-        const bool canCopy = codeTab >= 0 && HasPresetCode(codeTab);
-        if (!canCopy && g_panel.selected == copyCodeItem)
-            g_panel.selected = pasteCodeItem;  // (moved onto with the keyboard or a controller: it isn't shown)
-        static char copyHelp[320];  // (the help box shows it after this block)
-        snprintf(copyHelp, sizeof copyHelp,
-                 "Copies your %s settings (this preset's) as a code, one line of text to share: paste it in Discord "
-                 "or anywhere. Whoever loads it with PASTE CODE gets your %s settings and keeps the rest of theirs.",
-                 codeTab == 0 ? "first person camera" : "graphics", codeTab == 0 ? "camera" : "graphics");
-        if (canCopy && Button(copyCodeItem, boxX, cwBtn, "COPY CODE", false, copyHelp)) {
-            const std::string code = PresetCode(codeTab);
-            char text[112];
-            if (code.empty()) {
-                SetStatus("CODES ARE FOR THE FIRST PERSON AND GRAPHICS TABS - OPEN ONE TO COPY ITS CODE", now);
-            } else if (CopyToClipboard(code)) {
-                snprintf(text, sizeof text, "%s CODE COPIED (PRESET %s, %d CHARACTERS) - PASTE IT TO SHARE", kTabs[TabOfCode(codeTab)],
-                         PresetLabel(ActivePreset()).c_str(), static_cast<int>(code.size()));
-                SetStatus(text, now);
-                Log("overlay: preset %d's %s code copied: %s", ActivePreset() + 1, kTabs[TabOfCode(codeTab)], code.c_str());
-            } else {
-                SetStatus("COULD NOT COPY TO THE CLIPBOARD", now);
-            }
+        const float cwBtn = codeW;
+        if (Button(copyCodeItem, boxX, cwBtn, "COPY PRESET", false,
+                   "Copies your first person camera or graphics settings (this preset's, you choose which) as a code, "
+                   "one line of text to share: paste it in Discord or anywhere. Whoever loads it with PASTE PRESET gets "
+                   "those settings and keeps the rest of theirs.")) {
+            g_panel.askCopy = true;
+            // (Highlighted to start with: this tab's code, else first person.)
+            g_panel.askChoice = CodeOfTab(g_panel.tab) == 1 ? 2 : 1;
         }
-        const float pasteX = canCopy ? boxX + cwBtn + S(12) : boxX;
-        if (Button(pasteCodeItem, pasteX, cwBtn, "PASTE CODE", false,
+        const float pasteX = boxX + cwBtn + codeGap;
+        if (Button(pasteCodeItem, pasteX, cwBtn, "PASTE PRESET", false,
                    "Copy someone's code first (from Discord or anywhere: the whole message is fine), then press "
                    "this to load it into the preset in use. A first person code sets the first person settings, a "
                    "graphics code the graphics: everything else stays yours, the preset's name too. Press SAVE to keep "
@@ -4447,7 +4489,8 @@ int BuildQuestion(int screenWidth, int screenHeight, const Input& in, const char
         Text(kFontSmall, std::round(x + (buttonW - TextWidth(kFontSmall, labels[b], S(2))) * 0.5f),
              buttonsY + std::round((buttonH - LineHeight(kFontSmall)) * 0.5f), labels[b], White(lit ? 1.0f : 0.88f), S(2));
     }
-    if (escCancels)
+    // (Only where it fits left of the buttons: three of them reach over it.)
+    if (escCancels && bx + pad + TextWidth(kFontSmall, "ESC CANCELS", S(1)) + S(16) <= firstX)
         Text(kFontSmall, bx + pad, buttonsY + std::round((buttonH - LineHeight(kFontSmall)) * 0.5f), "ESC CANCELS", kDim, S(1));
     if (in.activate)
         chosen = g_panel.askChoice;
@@ -4496,6 +4539,35 @@ void BuildDefaultsQuestion(int screenWidth, int screenHeight, const Input& in, d
     }
     if (chosen >= 0)
         g_panel.askDefaults = false;
+}
+
+// COPY PRESET asks which code: the first person camera's or the graphics' (this preset's); Esc never minds.
+void BuildCopyQuestion(int screenWidth, int screenHeight, const Input& in, double now)
+{
+    static const char* const kLabels[3] = { "CANCEL", "FIRST PERSON", "GRAPHICS" };
+    char question[96];
+    snprintf(question, sizeof question, "Copy which code of preset %s?", PresetLabel(ActivePreset()).c_str());
+    const int chosen = BuildQuestion(screenWidth, screenHeight, in, "COPY PRESET", question,
+                                     "FIRST PERSON: your first person camera settings. GRAPHICS: your graphics.",
+                                     "Paste it anywhere to share; PASTE PRESET loads it.", kLabels, 3, true);
+    if (chosen < 0)
+        return;
+    g_panel.askCopy = false;
+    if (chosen == 0)
+        return;
+    const int codeTab = chosen == 1 ? 0 : 1;
+    const std::string code = HasPresetCode(codeTab) ? PresetCode(codeTab) : std::string();
+    char text[112];
+    if (code.empty()) {
+        SetStatus("COULD NOT MAKE THAT CODE", now);
+    } else if (CopyToClipboard(code)) {
+        snprintf(text, sizeof text, "%s CODE COPIED (PRESET %s, %d CHARACTERS) - PASTE IT TO SHARE", kTabs[TabOfCode(codeTab)],
+                 PresetLabel(ActivePreset()).c_str(), static_cast<int>(code.size()));
+        SetStatus(text, now);
+        Log("overlay: preset %d's %s code copied: %s", ActivePreset() + 1, kTabs[TabOfCode(codeTab)], code.c_str());
+    } else {
+        SetStatus("COULD NOT COPY TO THE CLIPBOARD", now);
+    }
 }
 
 // A change that only takes effect once the game restarts (the sound mods): said so, with an OK
@@ -5090,6 +5162,10 @@ void OverlayFrame(HDC dc)
             g_panel.dirty = true;
         if (GetEnvironmentVariableA("MXCAM_TEST_MENU_ASK_DEFAULTS", nullptr, 0) > 0)
             g_panel.askDefaults = true;
+        if (GetEnvironmentVariableA("MXCAM_TEST_MENU_ASK_COPY", nullptr, 0) > 0) {
+            g_panel.askCopy = true;
+            g_panel.askChoice = 1;
+        }
         if (GetEnvironmentVariableA("MXCAM_TEST_MENU_ASK_RESTART", nullptr, 0) > 0) {
             snprintf(g_panel.restartText, sizeof g_panel.restartText, "250F SOUND ON - RESTART THE GAME TO HEAR IT");
             g_panel.askRestart = true;
@@ -5159,6 +5235,8 @@ void OverlayFrame(HDC dc)
         g_panel.askRestart = false;  // Esc on the notice: read, the menu stays open
     } else if (g_panel.askDefaults && focus && escape) {
         g_panel.askDefaults = false;  // Esc on the question: nothing reset, the menu stays open
+    } else if (g_panel.askCopy && focus && escape) {
+        g_panel.askCopy = false;  // Esc on the question: nothing copied, the menu stays open
     } else if (g_panel.askSticky && focus && escape) {
         // Esc on the question: never mind (the indicator goes back off), the menu stays open.
         EditConfig().dabIndicator = false;
@@ -5171,7 +5249,7 @@ void OverlayFrame(HDC dc)
         g_panel.setupNameFocus = false;  // Esc while naming a setup: done typing, the menu stays
     } else if (g_panel.closeRequest || (focus && g_panel.listening < 0 && g_panel.renaming < 0 && !g_panel.searchFocus &&
                                         !g_panel.setupNameFocus &&
-                                        !g_panel.askSticky && !g_panel.askDefaults && !g_panel.askRestart &&
+                                        !g_panel.askSticky && !g_panel.askDefaults && !g_panel.askRestart && !g_panel.askCopy &&
                                         (menuKey || escape))) {
         g_panel.askSticky = false;
         ClosePanel();
@@ -5271,7 +5349,7 @@ void OverlayFrame(HDC dc)
         }
         g_menuBegin = g_batch.size();
         g_menuCursor = SIZE_MAX;
-        if (g_panel.askSticky || g_panel.askDefaults || g_panel.askRestart) {
+        if (g_panel.askSticky || g_panel.askDefaults || g_panel.askRestart || g_panel.askCopy) {
             // The question takes every click and key; the menu behind it is shown, untouched.
             Input none;
             none.mx = none.my = -1;
@@ -5282,6 +5360,8 @@ void OverlayFrame(HDC dc)
                 BuildRestartNotice(width, height, in, now);
             else if (g_panel.askDefaults)
                 BuildDefaultsQuestion(width, height, in, now);
+            else if (g_panel.askCopy)
+                BuildCopyQuestion(width, height, in, now);
             else
                 BuildStickyQuestion(width, height, in, now);
         } else {
