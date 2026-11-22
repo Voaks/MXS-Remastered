@@ -2163,7 +2163,9 @@ constexpr char kArmFragmentApply[] =
 // (mx_pos: it stays on the gear as it moves) - more on the boots and shins (at rest, under the knees:
 // u_mx_rleg), less on the helmet, a little more on what faces forward (the rider stands in a T at rest,
 // facing its -z) and down, a little less on what faces up. Its own amount curve: gentler, and patchier,
-// so even at 100% it's caked patches, smears and cleaner gaps - never one brown coat (the user). Which
+// so even at 100% it's caked patches, smears and cleaner gaps - never one brown coat (the user). Past the
+// old most (u_mx_body over 1: the slider over 60%, see kRiderDirtOldMost) it grows slower and its patches
+// spread wider, so more of it cakes but gaps stay (the curve carried straight on caked the hips solid). Which
 // way the surface faces at rest: from the triangle's own slope in mx_pos, turned outwards as the view's
 // own slope says.
 constexpr char kBodyFragmentApply[] =
@@ -2184,9 +2186,10 @@ constexpr char kBodyFragmentApply[] =
     "\t\t\tmx_base = 0.15;\n"
     "\t\t\tmx_gain = 0.85;\n"
     "\t\t\tmx_cube = 0.1;\n"
-    "\t\t\tmx_spread = 1.05;\n"
+    "\t\t\tfloat mx_over = max(u_mx_body - 1.0, 0.0);\n"
+    "\t\t\tmx_spread = 1.05 + 1.5 * mx_over;\n"
     "\t\t\tmx_filmk = 0.6;\n"
-    "\t\t\tmx_amt = pow(u_mx_body, 0.75);\n"
+    "\t\t\tmx_amt = pow(min(u_mx_body, 1.0), 0.75) + 0.5 * mx_over;\n"
     "\t\t} else {\n"
     "\t\thighp vec3 mx_b = (u_mx_tobike * vec4(mx_pos, 1.0)).xyz;\n"
     "\t\tvec3 mx_bn = normalize(u_mx_bikeview * normalize(interp_normal));\n"
@@ -5087,6 +5090,8 @@ bool KeepOwnPart(const DrawCall& draw, const double toBike[16], const BodyFrame&
 }
 
 // ---- Rider dirt: mud and dust on your own rider's gear (kBodyFragmentApply, u_mx_bodyp.w) ----------
+// The slider value where the old 100% now sits (RiderDirt 0.6 = the most there was before).
+constexpr double kRiderDirtOldMost = 0.6;
 // The same bike shader draws the riders. A rider's draw gets the mud only if it's yours, by the same
 // rules as your bike's parts:
 //  - in first person, the rider with the game's eye in its head (as Hide torso & head);
@@ -5402,7 +5407,9 @@ void PaintBikeDirt(const DrawCall& draw, bool tire)
             real_glUniform1f(p.metre, metre);
             p.metreSet = metre;
         }
-        want = static_cast<float>(cfg.riderDirt);
+        // (Rescaled: what 100% was is now at 60% - the user: "the current 100% should be like 60%" - so
+        // the slider reaches past it, to 1/0.6 of the old most. The shader takes amounts over 1.)
+        want = static_cast<float>(cfg.riderDirt / kRiderDirtOldMost);
     };
     if (riderDraw) {
         GLfloat leg[4], arm[4];
