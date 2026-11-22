@@ -1823,6 +1823,10 @@ struct PanelState {
     bool   setupNameFocus = false;    // (typing it)
     std::string setupConfirm;         // SETUPS: a setup to overwrite, its SAVE clicked once (again within 3 s: done)
     double setupConfirmAt = -10;
+    std::string setupDelete;          // SETUPS: a setup to delete, its DELETE clicked once (again within 3 s: done)
+    double setupDeleteAt = -10;
+    std::string setupRenaming;        // SETUPS: the setup being renamed ("" none), and its new name so far
+    std::string setupRenameDraft;
     float  resizeScale = 1, resizeW = 0, resizeH = 0, resizeX = 0, resizeY = 0;  // when that began: the size, the mouse
     float  baseScale    = 1.0f;       // this window's usual scale, and the biggest the whole panel fits at
     float  fitScale     = 1.0f;
@@ -2212,10 +2216,26 @@ void OpenPanel(HWND window)
 void FinishRename(bool keep, double now);
 void ClearSearch();
 
+// A setup's rename (SETUPS, RENAME): the name typed kept (its file renamed), or not.
+void FinishSetupRename(bool keep, double now)
+{
+    if (g_panel.setupRenaming.empty())
+        return;
+    const std::string from = g_panel.setupRenaming, to = g_panel.setupRenameDraft;
+    g_panel.setupRenaming.clear();
+    if (!keep || to == from)
+        return;
+    const char* why = setups::Rename(from, to);
+    char text[160];
+    snprintf(text, sizeof text, "%s", why ? why : ("RENAMED " + from + " TO " + to).c_str());
+    SetStatus(text, now);
+}
+
 void ClosePanel()
 {
     if (g_panel.renaming >= 0)
         FinishRename(true, Seconds());
+    FinishSetupRename(true, Seconds());
     ClearSearch();
     g_panel.scrollDrag = false;
     g_panel.askDefaults = false;
@@ -3705,13 +3725,56 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
                 if (current)
                     GradientH(boxX, ly, std::round(boxW * 0.6f), rowH, Rgba(206, 18, 26, 0.22f), Rgba(206, 18, 26, 0.0f));
                 const float ty = ly + std::round((rowH - LineHeight(kFontLabel)) * 0.5f);
-                Text(kFontLabel, cx, ty, setup.name.c_str(), White(1.0f), 0);
-                if (!setup.bike.empty())
-                    Text(kFontSmall, cx + std::fmax(S(220), TextWidth(kFontLabel, setup.name.c_str(), 0) + S(24)),
-                         ly + std::round((rowH - LineHeight(kFontSmall)) * 0.5f), setup.bike.c_str(), kDim, S(1));
-                const float bh = S(32), by = ly + std::round((rowH - bh) * 0.5f), bw = S(96);
+                // (Five buttons from the right: SAVE, LOAD, COPY, RENAME, DELETE.)
+                const float bh = S(32), by = ly + std::round((rowH - bh) * 0.5f), bw = S(86), bgap = S(8);
+                const auto BX = [&](int k) { return right - (k + 1) * bw - k * bgap; };  // (k: 0 the rightmost)
+                const bool renaming = g_panel.setupRenaming == setup.name;
+                if (renaming) {
+                    // Its new name, typed in a box where the name was (Enter or OK keeps it, Esc or CANCEL doesn't).
+                    const float fx = cx - S(8), fw = BX(4) - S(12) - fx, fh = S(34), fy = ly + std::round((rowH - fh) * 0.5f);
+                    RoundedRect(fx - thin, fy - thin, fw + 2 * thin, fh + 2 * thin, S(5) + thin, kAccent);
+                    RoundedRect(fx, fy, fw, fh, S(5), Rgba(30, 30, 33, 1.0f));
+                    const float tx = fx + S(8), tty = fy + std::round((fh - LineHeight(kFontLabel)) * 0.5f);
+                    Text(kFontLabel, tx, tty, g_panel.setupRenameDraft.c_str(), White(1.0f), 0);
+                    if (std::fmod(now, 1.0) < 0.6)
+                        Rect(tx + TextWidth(kFontLabel, g_panel.setupRenameDraft.c_str(), 0) + S(2), tty, std::fmax(1.0f, S(2)),
+                             LineHeight(kFontLabel), White(1.0f));
+                } else {
+                    Text(kFontLabel, cx, ty, setup.name.c_str(), White(1.0f), 0);
+                    if (!setup.bike.empty())
+                        Text(kFontSmall, cx + std::fmax(S(220), TextWidth(kFontLabel, setup.name.c_str(), 0) + S(24)),
+                             ly + std::round((rowH - LineHeight(kFontSmall)) * 0.5f), setup.bike.c_str(), kDim, S(1));
+                }
+                // RENAME (OK while renaming) and DELETE (CANCEL while renaming; clicked twice: SURE?).
+                if (Button(BX(3), by, bw, bh, renaming ? "OK" : "RENAME", renaming, true)) {
+                    if (renaming) {
+                        FinishSetupRename(true, now);
+                    } else {
+                        g_panel.setupRenaming = setup.name;
+                        g_panel.setupRenameDraft = setup.name;
+                        g_panel.setupNameFocus = false;
+                        g_panel.setupDelete.clear();
+                        ClearSearch();
+                        PrimeTyping();
+                    }
+                }
+                const bool deleting = !renaming && g_panel.setupDelete == setup.name && now - g_panel.setupDeleteAt < 3.0;
+                if (Button(BX(4), by, bw, bh, renaming ? "CANCEL" : deleting ? "SURE?" : "DELETE", deleting, true)) {
+                    if (renaming) {
+                        FinishSetupRename(false, now);
+                    } else if (deleting) {
+                        g_panel.setupDelete.clear();
+                        const char* why = setups::Delete(setup.name);
+                        char text[128];
+                        snprintf(text, sizeof text, "%s", why ? why : ("DELETED " + setup.name).c_str());
+                        SetStatus(text, now);
+                    } else {
+                        g_panel.setupDelete = setup.name;
+                        g_panel.setupDeleteAt = now;
+                    }
+                }
                 const bool confirming = g_panel.setupConfirm == setup.name && now - g_panel.setupConfirmAt < 3.0;
-                if (Button(right - bw, by, bw, bh, confirming ? "SURE?" : "SAVE", confirming, !busy)) {
+                if (Button(BX(0), by, bw, bh, confirming ? "SURE?" : "SAVE", confirming, !busy)) {
                     if (confirming) {
                         setups::Save(setup.name, now);
                         g_panel.setupConfirm.clear();
@@ -3720,10 +3783,30 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
                         g_panel.setupConfirmAt = now;
                     }
                 }
-                if (Button(right - 2 * bw - S(10), by, bw, bh, "LOAD", true, !busy))
+                if (Button(BX(1), by, bw, bh, "LOAD", true, !busy))
                     setups::Load(setup.name, now);
+                // COPY: its code, to share (anywhere: no console needed).
+                if (Button(BX(2), by, bw, bh, "COPY", false, true)) {
+                    const std::string code = setups::SetupCode(setup.name);
+                    char text[160];
+                    if (code.empty()) {
+                        SetStatus("COULD NOT READ THAT SETUP", now);
+                    } else if (CopyToClipboard(code)) {
+                        std::string bike = setup.bike;
+                        for (char& c : bike)
+                            c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+                        snprintf(text, sizeof text, "%s SETUP CODE COPIED (%s, %d CHARACTERS) - PASTE IT TO SHARE",
+                                 bike.empty() ? "THE" : bike.c_str(), setup.name.c_str(), static_cast<int>(code.size()));
+                        SetStatus(text, now);
+                        Log("setups: \"%s\" copied as a code: %s", setup.name.c_str(), code.c_str());
+                    } else {
+                        SetStatus("COULD NOT COPY TO THE CLIPBOARD", now);
+                    }
+                }
                 OfferHelp("LOAD puts this setup on your bike (the game's /readsetup). SAVE writes the setup you're riding with "
-                          "over it (the game's /writesetup) - click it twice: the second time it says SURE?.",
+                          "over it (the game's /writesetup) - click it twice: the second time it says SURE?. COPY copies it as "
+                          "a code to share: its bike and tuning, never your name, number, gear or controls. RENAME gives it "
+                          "another name (Enter keeps it, Esc doesn't); DELETE removes it - click it twice.",
                           ly, ly + rowH, cx, cw, in.Inside(cx, ly, cw, rowH) && in.Inside(boxX, boxY + notesBarH, boxW, boxH - notesBarH),
                           false);
             }
@@ -3740,10 +3823,12 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
         const char* label = "NEW SETUP";
         const float labelW = TextWidth(kFontSmall, label, S(2));
         Text(kFontSmall, cx, fy + std::round((fh - LineHeight(kFontSmall)) * 0.5f), label, kSection, S(2));
-        const float fx = cx + labelW + S(16), saveW = S(170), fw = right - saveW - S(12) - fx;
+        const float saveW = S(170), pasteW = S(170);
+        const float fx = cx + labelW + S(16), fw = right - saveW - pasteW - 2 * S(12) - fx;
         const bool fieldHot = in.Inside(fx, fy, fw, fh);
         if (in.pressed) {
             if (fieldHot && !g_panel.setupNameFocus) {
+                FinishSetupRename(true, now);  // (a rename going: kept, then this typed into)
                 g_panel.setupNameFocus = true;
                 ClearSearch();
                 PrimeTyping();
@@ -3779,6 +3864,58 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
         OfferHelp("Saves the setup you're riding with under this name (the game's /writesetup), in your setups folder "
                   "(made for you the first time). Enter saves it too.",
                   fy, fy + fh, fx, right - fx, fieldHot || saveHot, false);
+        // PASTE SETUP: a shared setup's code (on the clipboard) saved as a new setup - under the name typed,
+        // else "shared" - with your own name, number, gear and controls in it. No console needed.
+        {
+            // (On a track, as LOAD and SAVE: your own settings are read from your bike - the game's console
+            // writes them out - so the paste can't change them.)
+            const float px2 = sx - S(12) - pasteW;
+            const bool pasteHot = !busy && in.Inside(px2, fy, pasteW, fh);
+            RoundedRect(px2, fy, pasteW, fh, S(5), busy ? Rgba(26, 26, 29, 1.0f) : pasteHot ? Rgba(58, 58, 64, 1.0f) : Rgba(34, 34, 38, 1.0f));
+            const char* pasteLabel = "PASTE SETUP";
+            Text(kFontSmall, px2 + std::round((pasteW - TextWidth(kFontSmall, pasteLabel, S(2))) * 0.5f),
+                 fy + std::round((fh - LineHeight(kFontSmall)) * 0.5f), pasteLabel, busy ? kDim : White(1.0f), S(2));
+            OfferHelp("Copy someone's setup code first (from Discord or anywhere: the whole message is fine), then press this "
+                      "on a track: it's saved as a new setup - under the name typed here, else \"shared\" - and LOAD puts it on "
+                      "your bike. Only the bike and its tuning are theirs: your name, number, gear, controls, stability, auto "
+                      "clutch, brakes and dab speed are read from your bike as it is. None of your setups is ever written over.",
+                      fy, fy + fh, px2, pasteW, in.Inside(px2, fy, pasteW, fh), false);
+            if (pasteHot && in.pressed) {
+                const setups::PastedSetup r = setups::PasteSetupCode(ClipboardText().c_str(), g_panel.setupName, now);
+                char text[176];
+                std::string bike = r.bike;
+                for (char& c : bike)
+                    c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+                switch (r.status) {
+                case setups::PastedSetup::NotFound:
+                    SetStatus("NO SETUP CODE ON THE CLIPBOARD - COPY ONE FIRST (IT STARTS WITH MXS-REMASTERED-SET-)", now);
+                    break;
+                case setups::PastedSetup::Damaged:
+                    SetStatus("THAT SETUP CODE IS INCOMPLETE OR MISTYPED - COPY ALL OF IT", now);
+                    break;
+                case setups::PastedSetup::Newer:
+                    SetStatus("THAT SETUP CODE IS FROM A NEWER MXS REMASTERED - UPDATE TO LOAD IT", now);
+                    break;
+                case setups::PastedSetup::NoOwnSetup:
+                    SetStatus("COULDN'T READ YOUR OWN SETTINGS FROM YOUR BIKE", now);
+                    break;
+                case setups::PastedSetup::Failed:
+                    SetStatus("COULDN'T START THE PASTE - TRY AGAIN ON A TRACK", now);
+                    break;
+                case setups::PastedSetup::Reading:  // (the result follows in the readout: setups::Status)
+                    g_panel.statusUntil = 0;
+                    g_panel.setupName.clear();
+                    g_panel.setupNameFocus = false;
+                    break;
+                case setups::PastedSetup::Saved:
+                    snprintf(text, sizeof text, "%s SETUP SAVED AS \"%s\" - LOAD IT ON A TRACK", bike.c_str(), r.name.c_str());
+                    SetStatus(text, now);
+                    g_panel.setupName.clear();
+                    g_panel.setupNameFocus = false;
+                    break;
+                }
+            }
+        }
     } else if (rowsShown == 0 && searching) {
         char none[96];
         snprintf(none, sizeof none, "Nothing matches \"%s\"", g_panel.query.c_str());
@@ -5245,10 +5382,12 @@ void OverlayFrame(HDC dc)
         FinishRename(false, now);  // Esc while renaming: the name stays as it was, the menu open
     } else if (focus && escape && g_panel.listening < 0 && (g_panel.searchFocus || !g_panel.search.empty())) {
         ClearSearch();  // Esc with a search: the search goes, the menu stays
+    } else if (focus && escape && !g_panel.setupRenaming.empty()) {
+        FinishSetupRename(false, now);  // Esc while renaming a setup: its name stays, the menu stays
     } else if (focus && escape && g_panel.setupNameFocus) {
         g_panel.setupNameFocus = false;  // Esc while naming a setup: done typing, the menu stays
     } else if (g_panel.closeRequest || (focus && g_panel.listening < 0 && g_panel.renaming < 0 && !g_panel.searchFocus &&
-                                        !g_panel.setupNameFocus &&
+                                        !g_panel.setupNameFocus && g_panel.setupRenaming.empty() &&
                                         !g_panel.askSticky && !g_panel.askDefaults && !g_panel.askRestart && !g_panel.askCopy &&
                                         (menuKey || escape))) {
         g_panel.askSticky = false;
@@ -5274,9 +5413,21 @@ void OverlayFrame(HDC dc)
         in.nav = in.step = 0;
         in.activate = false;
     }
-    if (g_panel.renaming >= 0 || g_panel.searchFocus || g_panel.setupNameFocus) {
+    if (g_panel.renaming >= 0 || g_panel.searchFocus || g_panel.setupNameFocus || !g_panel.setupRenaming.empty()) {
         // Keys type the name (or the search): none of them move around the menu.
-        if (g_panel.setupNameFocus) {
+        if (!g_panel.setupRenaming.empty()) {
+            // (A setup's new name: as a new one's - no spaces: those become '_'. Off its tab: never mind.)
+            const bool entered = TypeInto(g_panel.setupRenameDraft, 40, now);
+            std::string clean;
+            for (char c : g_panel.setupRenameDraft)
+                if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == ' ')
+                    clean += c == ' ' ? '_' : c;
+            g_panel.setupRenameDraft = clean;
+            if (g_panel.tab != kTabSetups || g_panel.notes)
+                FinishSetupRename(false, now);
+            else if (!focus || entered)
+                FinishSetupRename(true, now);
+        } else if (g_panel.setupNameFocus) {
             // (A setup's name: what the game's command takes - no spaces: those become '_'.)
             const bool entered = TypeInto(g_panel.setupName, 40, now);
             std::string clean;

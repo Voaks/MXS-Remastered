@@ -41,6 +41,32 @@ bool Busy();
 // The setup last loaded or saved this session ("" none), to mark it in the list.
 const std::string& Current();
 
+// A setup renamed, or deleted: its file in your setups folder (no console needed; never another
+// setup written over). Null if done, else why not (upper case, for the menu).
+const char* Rename(const std::string& from, const std::string& to);
+const char* Delete(const std::string& name);
+
+// Setup codes, to share a setup as one line of text ("MXS-REMASTERED-SET-..."): its bike and its tuning
+// (suspension, steering, gearing, brakes, the rider's weight...) - never the rider's own: their name,
+// number, gear and graphics, nor their controls and aids (reversed steering, sticky dab, the assists).
+// SetupCode: the code of one of your setups ("" if it can't be read).
+std::string SetupCode(const std::string& name);
+
+// The first setup code in text (a whole message pasted is fine), saved as a new setup in your setups
+// folder: under wantedName if that's a valid name (else "shared"), a number added if it's taken (none of
+// yours is ever written over). Your own name, number, gear, graphics, controls and the settings that are
+// yours (kPersonal) go into it from your bike as it is now: the game writes your setup out first
+// (/writesetup, on a track: Reading - the result in Status() once it's done). Load it as any other.
+struct PastedSetup {
+    enum Status { NotFound, Damaged, Newer, NoOwnSetup, Failed, Reading, Saved } status = NotFound;
+    std::string bike;   // the bike it's for (its bike= line)
+    std::string name;   // what it was saved as
+};
+PastedSetup PasteSetupCode(const char* text, const std::string& wantedName, double now);
+
+// The same at once, your own lines from ownFile (a setup file of yours): for tests.
+PastedSetup PasteSetupCodeFrom(const char* text, const std::string& wantedName, const std::wstring& ownFile);
+
 // A key of the game's own, from its settings (its config file: "<setting>=(k)<key>"): a character ("t",
 // ",") or one of the game's key names ("F2", "Enter", "Right Ctrl", "Keypad 5", ...). False: not set,
 // or not a keyboard key (a controller's or the mouse's button); name: what the settings say either way.

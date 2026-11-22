@@ -56,6 +56,14 @@ Share your setup without sending files. Press **COPY PRESET** (on any tab) and c
 
 To load someone's code, copy it (the whole message is fine), open the menu and press **PASTE PRESET**, from any tab. It loads into the preset you're on: a first person code changes only your first person settings and a graphics code only your graphics, and everything else stays yours (keybinds are never in a code). Press **SAVE** to keep it, or quit without saving to go back to how that preset was.
 
+### Setup codes
+
+Bike setups can be shared the same way. On the **SETUPS** tab, **COPY** on a setup's row copies it as one line of text (it starts with `MXS-REMASTERED-SET-`, about 300 characters). It holds the bike and its tuning (suspension, steering, gearing, rider settings), never your name, number, gear, graphics or control settings, nor your stability, auto clutch RPMs, braking torques or max dab speed.
+
+To use someone's setup, copy their code and press **PASTE SETUP** while on a track. It's saved as a new setup, under the name you typed in the box or "shared" if it's empty. A number is added if the name is taken, so none of your setups is ever overwritten. Your own name, number, gear, graphics, controls and those settings are read from your bike as it is right then (the mod has the game save your current setup to a temporary file, reads it and deletes it). Then press **LOAD** on it. A setup is made for one bike, so it works best on the bike it was made for.
+
+Each setup also has **RENAME** (type the new name, then Enter or **OK**; Esc or **CANCEL** keeps the old one) and **DELETE** (click twice: the second click says **SURE?**).
+
 | Key | What it does |
 |---|---|
 | **E** | Opens and closes the menu |
