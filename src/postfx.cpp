@@ -5576,7 +5576,8 @@ void DrawRainfall(const double V[16], const double P[16], Vec3 eye, Vec3 up, Vec
 constexpr int    kRoostMax          = 9000;   // bits alive at once (dust and clods, every bike's)
 constexpr double kRoostDustRate     = 55.0;   // puffs a second, fully on
 constexpr double kRoostClodRate     = 120.0;  // clods a second, fully on
-constexpr double kRoostExposure     = 0.02;   // s: how long a clod's streak is (its motion in that time)
+constexpr double kRoostExposure     = 0.02;   // s: how long a water drop's streak is (its motion in that time, x1.8)
+constexpr double kRoostClodExposure = 0.006;  // s: a clod's (short: streaked longer, every chunk was a faint oval)
 constexpr double kRoostDropRate     = 750.0;  // water drops a second, fully on (the rain's Config::waterSpray)
 constexpr double kRoostMistRate     = 110.0;  // puffs of spray a second, fully on
 struct RoostBit {
@@ -5784,8 +5785,10 @@ RoostThrow EmitRoost(Vec3 contact, Vec3 forward, Vec3 velocity, Vec3 accel, bool
             b.vel = forward * (-RoostRange(2.0, 7.0) * push * u) + up * (RoostRange(1.5, 4.5) * u) +
                     outside * (slide * RoostRange(1.0, 4.0) * u) + across * (RoostRange(-1.2, 1.2) * u) + velocity * 0.15;
             b.life = 2.5;
-            b.size0 = RoostRange(0.012, 0.03) * u * (rain ? 1.4 : 1.0);
-            b.alpha0 = 0.95;
+            // (Mostly crumbs, now and then a chunk: 1.6 to 13 cm across, the big ones few.)
+            const double s = RoostRandom();
+            b.size0 = (0.008 + 0.057 * s * s * s) * u * (rain ? 1.3 : 1.0);
+            b.alpha0 = 1.0;
         }
         b.size = b.size0;
         g_roost.push_back(b);
@@ -6014,7 +6017,7 @@ void Roost(const double V[16], const double P[16], Vec3 eye, Vec3 up, Vec3 water
         else
             alpha = b.alpha0 * Clamp((1.0 - t) * 4.0, 0.0, 1.0);
         const Vec3 rel = b.pos - eye;
-        const Vec3 move = (b.vel - g_roostCamVel) * (b.kind == 2 ? 1.8 * kRoostExposure : kRoostExposure);  // (water: longer streaks)
+        const Vec3 move = (b.vel - g_roostCamVel) * (b.kind == 2 ? 1.8 * kRoostExposure : b.kind == 1 ? kRoostClodExposure : kRoostExposure);
         const float v[11] = { static_cast<float>(rel.x), static_cast<float>(rel.y), static_cast<float>(rel.z), static_cast<float>(b.size),
                               static_cast<float>(alpha), static_cast<float>(b.kind), static_cast<float>(b.seed), static_cast<float>(t),
                               static_cast<float>(move.x), static_cast<float>(move.y), static_cast<float>(move.z) };
@@ -6043,7 +6046,7 @@ void Roost(const double V[16], const double P[16], Vec3 eye, Vec3 up, Vec3 water
     else if (snow)
         g_gl.Uniform3f(p["u_clodShade"], 0.8f, 0.82f, 0.86f);
     else
-        g_gl.Uniform3f(p["u_clodShade"], 0.42f, 0.38f, 0.35f);
+        g_gl.Uniform3f(p["u_clodShade"], 0.5f, 0.38f, 0.3f);  // (darker and warmer than the ground: the damp dirt under it)
     g_gl.Uniform1f(p["u_dustBright"], snow ? 1.1f : 1.6f);
     Vec(p, "u_water", waterLight);  // (the spray: the light of the grey sky through it)
     Bind(p, "u_depth", 0, g_res.depth);

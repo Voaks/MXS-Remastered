@@ -1842,6 +1842,7 @@ out float v_kind;
 out float v_seed;
 out float v_z;
 out float v_size;
+out float v_age;
 
 void main()
 {
@@ -1872,6 +1873,7 @@ void main()
     v_seed = a_data.z;
     v_z = -v.z;
     v_size = shown;
+    v_age = a_data.w;
     gl_Position = u_proj * vec4(v, 1.0);
 }
 )GLSL";
@@ -1891,6 +1893,7 @@ in float v_kind;
 in float v_seed;
 in float v_z;
 in float v_size;
+in float v_age;
 out vec4 o_color;
 
 float Hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -1930,10 +1933,24 @@ void main()
         // (Lighter and paler than the ground it came off: fine dust in the air scatters the light.)
         col = mix(dirt, vec3(dot(dirt, vec3(0.2126, 0.7152, 0.0722))), 0.2) * u_dustBright * mix(0.85, 1.15, billow);
     } else {
-        // A clod: a lump with a ragged edge.
-        float r = sqrt(d2) * (0.8 + 0.35 * Noise(v_uv * 2.0 + v_seed * 53.0));
-        a = smoothstep(1.0, 0.75, r);
-        col = dirt * u_clodShade;
+        // A clod: a chunk of dirt (the user's picture: solid, ragged, lit, from crumbs to fist-sized
+        // lumps - not a faint oval). Its outline: a lumpy, uneven edge all its own (noise round the
+        // circle, so no seam), turning as it tumbles; a hard edge, a pixel soft. Lit as a lumpy ball
+        // from above (fixed on screen as it turns), with a crumbly grain and its own tone.
+        float turn = v_seed * 6.2831853 + v_age * (v_seed - 0.5) * 60.0;
+        vec2 p = mat2(cos(turn), sin(turn), -sin(turn), cos(turn)) * v_uv;
+        float r = length(p);
+        vec2 dir = r > 1e-4 ? p / r : vec2(1.0, 0.0);
+        float rim = 0.55 + 0.3 * Noise(dir * 1.9 + v_seed * 91.0) + 0.14 * Noise(dir * 4.7 + v_seed * 13.0);
+        float soft = max(fwidth(r), 0.04);
+        a = 1.0 - smoothstep(rim - soft, rim + soft, r);
+        vec2 q = v_uv / rim;
+        vec3 n = vec3(q, sqrt(max(1.0 - dot(q, q), 0.0)) + 0.25);
+        n.xy += 0.6 * (vec2(Noise(p * 4.5 + v_seed * 7.0), Noise(p * 4.5 + v_seed * 11.0)) - 0.5);
+        float lit = 0.42 + 0.95 * max(dot(normalize(n), normalize(vec3(-0.35, 0.8, 0.5))), 0.0);
+        float grain = 0.68 + 0.64 * Noise(p * 9.0 + v_seed * 71.0);
+        float tone = 0.78 + 0.44 * fract(v_seed * 7.13);
+        col = dirt * u_clodShade * lit * grain * tone;
     }
     a = clamp(a, 0.0, 1.0) * v_alpha;
     // Softly into what's nearer: dust settling on the ground fades into it rather than cutting off.
