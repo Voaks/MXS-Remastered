@@ -1406,6 +1406,10 @@ const RowDef kRows[] = {
         .Help("Keeps the view calm: the quick jolts of the bike (bumps, landings, the suspension diving "
               "under braking) don't reach it. It still eases into a corner's lean or a wheelie, as far as "
               "the locks above let it. Off follows every jolt."),
+    Slider(kTabFirstPerson, nullptr,           "Lean limiter",         &Config::leanLimiter,      0.0,   1.0,  0.01, 100.0, 0, "%", "Off")
+        .Help("Tones down how much the view swings as you lean forward and back: the camera's move along the "
+              "bike and its tilt on it are cut by this much (100%: held where it usually sits). The bike's own "
+              "pitching is Pitch lock's, the bumps Steadiness's. Off: as the game moves it."),
     Slider(kTabFirstPerson, "HEAD POSITION",   "Head forward / back",  &Config::headForward,      -3.0,  3.0,  0.01, 1.0,   2, " m")
         .Help("Moves your eyes forward (+) or back (-) along the bike."),
     Slider(kTabFirstPerson, nullptr,           "Head height",          &Config::headHeight,       -3.0,  3.0,  0.01, 1.0,   2, " m")

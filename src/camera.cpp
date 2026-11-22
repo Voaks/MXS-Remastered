@@ -172,6 +172,13 @@ constexpr double kWhipLevelOmega = 5.0;
 constexpr double kWhipMaxRate    = 120.0 * kDegToRad;  // rad/s carried over at most
 // The head's nod follows the neck on this spring (1/s); see Orient(), section 5.
 constexpr double kNodOmega = 8.0;
+
+// Lean limiter: the game camera's usual place on the bike follows it over about 4 s (1/s) on the
+// ground; a lean is counted to at most 2 units (~60 cm) along the bike and 25 deg of pitch (a crash's
+// tumble isn't one).
+constexpr double kLeanNeutralRate = 0.25;
+constexpr double kLeanMaxShift    = 2.0;
+constexpr double kLeanMaxPitch    = 25.0;
 constexpr double kTravelHoldBack = 0.25;  // s
 constexpr int    kTravelSamples  = 128;   // frames of history: covers it up to ~500 fps
 // In the air the path seen from above is a straight line, so the held direction then settles
@@ -289,6 +296,11 @@ struct State {
     double neckVelocity = 0;
     double nod          = 0;      // the head's nod from the neck (rad, eased: kNodOmega)
     double nodRate      = 0;
+    // Lean limiter: where the game camera sits along the bike and how it's pitched on it, usually
+    // (averaged over a few seconds on the ground): leaning moves it from there.
+    bool   leanHave     = false;
+    double leanAlong    = 0;      // world units along the bike
+    double leanPitch    = 0;      // rad
 };
 
 // Everything the orientation half carries from frame to frame. A preview runs on a copy.
@@ -316,6 +328,7 @@ struct Frame {
     Quat   rot;                         // final view orientation
     Vec3   offsetFwd, offsetUp;         // head offset axes and amounts
     double forwardOffset = 0, heightOffset = 0;
+    Vec3   leanShift;                   // lean limiter: added to the eye (world)
     Telemetry telemetry;
 };
 
@@ -749,6 +762,51 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
     const double cameraPitchExcess = cameraAtt.pitch - m.cameraPitchRest.Degrees() * kDegToRad;
     const double bikePitchExcess   = haveBike ? bikeAtt.pitch - m.bikePitchRest.Degrees() * kDegToRad : 0.0;
 
+    // Lean limiter (Config::leanLimiter): leaning forward / back moves the game camera against the
+    // bike - along it, and pitched on it (the tracker sees 20-35 cm and 6-8 deg of it). Where the
+    // camera sits along the bike and how it's pitched there are measured each frame (the camera in the
+    // bike's own space, as the tracker last matched them, both from the same frame) against where it
+    // usually is - an average over a few seconds on the ground, held still in the air and while looking
+    // round - and the slider's share of that is taken off: the eye moved back toward its usual place
+    // along the bike, the view's pitch toward its usual angle (before the steadiness springs, so its
+    // jolts can't come back through). Up and down is left to the neck. At 0: nothing at all.
+    double leanPitchCut = 0;  // rad off the game camera's pitch
+    f.leanShift = Vec3{};
+    if (cfg.leanLimiter > 0 && pose.tracked && haveBike) {
+        double inv[16];
+        const double* c = m.lastPose.cameraSpace;
+        if (AffineInverse(c, inv)) {
+            const Vec3 mf{ m.lastPose.forward[0], m.lastPose.forward[1], m.lastPose.forward[2] };
+            const Vec3 mu{ m.lastPose.up[0], m.lastPose.up[1], m.lastPose.up[2] };
+            const Vec3 eyeOnBike{ inv[12], inv[13], inv[14] };
+            const Vec3 lookOnBike = Normalize(Vec3{ -inv[8], -inv[9], -inv[10] });
+            const double toWorld = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) / std::fmax(scale, 1e-9);
+            const double along = Dot(eyeOnBike, mf) * toWorld;
+            const double pitchOnBike = std::atan2(Dot(lookOnBike, mu), Dot(lookOnBike, mf));
+            if (!s.leanHave || snap) {
+                s.leanAlong = along;
+                s.leanPitch = pitchOnBike;
+                s.leanHave = true;
+            } else if (onGround && absYawDeg < 20.0) {
+                const double a = LowPassAlpha(kLeanNeutralRate, dt);
+                s.leanAlong += (along - s.leanAlong) * a;
+                s.leanPitch += (pitchOnBike - s.leanPitch) * a;
+            }
+            // (Not while looking round: the camera turned on the bike isn't a lean.)
+            const double k = Clamp(cfg.leanLimiter, 0.0, 1.0) * (1.0 - SmoothStep(20.0, 40.0, absYawDeg));
+            const double dAlong = Clamp(along - s.leanAlong, -kLeanMaxShift, kLeanMaxShift);
+            const double dPitch = Clamp(pitchOnBike - s.leanPitch, -kLeanMaxPitch * kDegToRad, kLeanMaxPitch * kDegToRad);
+            f.leanShift = bikeFwd * (-dAlong * k);
+            leanPitchCut = dPitch * k;
+            tel.leanAlong = dAlong;
+            tel.leanPitchDeg = dPitch * kRadToDeg;
+            tel.leanShift = -dAlong * k;
+        }
+    } else if (cfg.leanLimiter <= 0) {
+        s.leanHave = false;  // (turned on again: its usual place found afresh)
+    }
+    const double leanedExcess = cameraPitchExcess - leanPitchCut;
+
     // Steadiness: like a gimbal, the view follows the lean and pitch through a critically damped
     // spring, so it eases into a corner's lean, a wheelie or a jump face, but the quick jolts of
     // bumps, landings and the suspension diving under braking don't reach it. The locks then take
@@ -770,7 +828,7 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
     const double cameraRestPitch = cameraAtt.pitch - cameraPitchExcess;
     Attitude gameSteady = cameraAtt;
     gameSteady.roll = Steady(s.steadyRoll[0], s.steadyRollRate[0], cameraAtt.roll, false);
-    const double gameExcess = Steady(s.steadyPitch[0], s.steadyPitchRate[0], cameraPitchExcess, false);
+    const double gameExcess = Steady(s.steadyPitch[0], s.steadyPitchRate[0], leanedExcess, false);
     Attitude bikeSteady = bikeAtt;
     double bikeExcess = bikePitchExcess;
     if (haveBike) {
@@ -786,7 +844,7 @@ bool Orient(Model& m, const double view[16], double dt, bool commit, Frame& f)
     const double heldLevel = cfg.whipLock * s.whip;
     Attitude gameView = cameraAtt;
     gameView.roll = Steady(s.viewRoll[0], s.viewRollRate[0], cameraAtt.roll * (1.0 - heldLevel), false);
-    const double gameViewExcess = Steady(s.viewPitch[0], s.viewPitchRate[0], cameraPitchExcess * (1.0 - heldLevel), false);
+    const double gameViewExcess = Steady(s.viewPitch[0], s.viewPitchRate[0], leanedExcess * (1.0 - heldLevel), false);
     Attitude bikeView = bikeAtt;
     double bikeViewExcess = bikePitchExcess;
     if (haveBike) {
@@ -1282,7 +1340,7 @@ bool FinishFrame(const double view[16], double correction[16])
 
     const double verticalOffset = (s.smoothHeight - rawHeight) + s.neckOffset;
     const Vec3 headOffset = g_frame.offsetFwd * g_frame.forwardOffset + g_frame.offsetUp * g_frame.heightOffset;
-    const Vec3 eye = rawPos + headOffset + worldUp * verticalOffset;
+    const Vec3 eye = rawPos + headOffset + g_frame.leanShift + worldUp * verticalOffset;
 
     // ---- 8. Rebuild the view matrix and derive the eye-space correction -----------------
     const Vec3 R = Rotate(g_frame.rot, { 1, 0, 0 });

@@ -306,6 +306,7 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Leveling",  L"PitchLock",            c.pitchLock },
         { L"Leveling",  L"MaxRollCorrectionDeg", c.maxRollCorrectionDeg },
         { L"Leveling",  L"Steadiness",           c.steadiness },
+        { L"Leveling",  L"LeanLimiter",          c.leanLimiter },
         { L"Air",       L"AirLooseness",         c.airLooseness },
         { L"Air",       L"WhipLock",             c.whipLock },
         { L"Look",      L"ControllerLook",       c.controllerLook ? 1.0 : 0.0 },
@@ -527,6 +528,7 @@ void CopyTunables(const Config& from, Config& to)
     to.pitchLock            = from.pitchLock;
     to.maxRollCorrectionDeg = from.maxRollCorrectionDeg;
     to.steadiness           = from.steadiness;
+    to.leanLimiter          = from.leanLimiter;
     to.airLooseness         = from.airLooseness;
     to.whipLock             = from.whipLock;
     to.controllerLook       = from.controllerLook;
@@ -834,6 +836,7 @@ Config ParseConfig(const Config& base)
     c.pitchLock            = ReadDouble(L"Leveling", L"PitchLock", c.pitchLock);
     c.maxRollCorrectionDeg = ReadDouble(L"Leveling", L"MaxRollCorrectionDeg", c.maxRollCorrectionDeg);
     c.steadiness           = ReadDouble(L"Leveling", L"Steadiness", c.steadiness);
+    c.leanLimiter          = Clamp(ReadDouble(L"Leveling", L"LeanLimiter", c.leanLimiter), 0.0, 1.0);
 
     c.airLooseness     = ReadDouble(L"Air", L"AirLooseness", c.airLooseness);
     c.whipLock         = ReadDouble(L"Air", L"WhipLock", c.whipLock);

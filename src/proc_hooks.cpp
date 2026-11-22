@@ -2794,7 +2794,7 @@ void StartTrace(double seconds)
                      "sh_replay_skinned_drawn/indices_changed/repointed/no_bones,sh_replay_rigid_drawn/indices_changed/repointed/no_bones,"
                      "sh_real_body_along,marks_repressed,marks_repress_waiting,marks_others_cached,marks_ms,marks_window_still,"
                      "gpu_shadow_flush_ms,gpu_effects_ms,cpu_shadow_flush_ms,cpu_effects_ms,cpu_cast_now_ms,cpu_wheel_watch_ms,"
-                     "sh_boxed_out/in,whip,game_step_ms,bike_rest,camera_rest\n");
+                     "sh_boxed_out/in,whip,game_step_ms,bike_rest,camera_rest,lean_along,lean_pitch_deg,lean_shift\n");
     // Times are relative to the key press: the history before it is negative.
     const double now = camera::ContentTime();
     g_traceFrames = 0;
@@ -2842,7 +2842,7 @@ void TraceFrame(bool captured)
             "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
             "%.3f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,"
             "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-            "%.1f,%d,%d,%d,%d,%s,%s,%.3f,%.2f,%.2f,%.2f\n",
+            "%.1f,%d,%d,%d,%d,%s,%s,%.3f,%.2f,%.2f,%.2f,%.4f,%.2f,%.4f\n",
             t.rawIntervalMs, t.dtMs, g_camera.previews, g_camera.otherRotations,
             t.cut ? 1 : 0, t.reset ? 1 : 0, t.bikeTracked ? 1 : 0, t.bikeFresh ? 1 : 0, t.customWeight,
             t.rawYaw, t.rawPitch, t.rawRoll, t.bikeYaw, t.bikePitch, t.bikeRoll, t.outYaw, t.outPitch, t.outRoll,
@@ -2851,7 +2851,7 @@ void TraceFrame(bool captured)
             pose.worldPosition[0], pose.worldPosition[1], pose.worldPosition[2],
             g_ground.awayDeg, g_ground.passes, g_ground.game, g_ground.filled, g_ground.open,
             g_ground.note[0] ? g_ground.note : "-", postfx::WheelTraceText(), t.whip, camera::LastStep() * 1000.0,
-            t.bikeRestDeg, t.cameraRestDeg);
+            t.bikeRestDeg, t.cameraRestDeg, t.leanAlong, t.leanPitchDeg, t.leanShift);
     }
 
     if (!g_trace)

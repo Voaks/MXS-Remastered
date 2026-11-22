@@ -57,6 +57,7 @@ struct Config {
     double pitchLock            = 0.5;    // 0..1 fraction of the bike's pitch removed (wheelies, jump faces)
     double maxRollCorrectionDeg = 90.0;
     double steadiness           = 0.6;    // 0..2 how much of the bike's quick jolts (bumps, landings, suspension) the view ignores
+    double leanLimiter          = 0.0;    // 0..1 how much of the game camera's swing as you lean forward / back is taken out (0: off)
 
     // [Air]
     double airLooseness     = 0.6;        // 0..1 how much of the nose's left / right swing in the air the view lets pass

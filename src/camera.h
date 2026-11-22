@@ -34,6 +34,9 @@ struct Telemetry {
     double whip              = 0;      // 0..1 how far whip lock holds the view
     double bikeRestDeg       = 0;      // the bike's resting pitch, learnt
     double cameraRestDeg     = 0;      // the game camera's resting pitch, learnt
+    double leanAlong         = 0;      // lean limiter: the game camera along the bike from its usual place (units, + = forward)
+    double leanPitchDeg      = 0;      // ...and pitched on the bike from its usual angle (+ = up)
+    double leanShift         = 0;      // ...how far the eye was moved back along the bike for it (units)
     double neckOffset        = 0;  // spring displacement along WorldUp (negative = compressed)
     double verticalOffset    = 0;  // total eye height change (smoothing + neck)
     // Attitudes in degrees: yaw (heading about WorldUp), pitch, roll.
