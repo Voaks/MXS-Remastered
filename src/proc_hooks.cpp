@@ -2939,8 +2939,14 @@ bool CanHoldBack(const DrawCall& draw, const GLfloat uploaded[16])
         return false;
     // (Every rider's, as this was, cast a few hundred draws one by one at a full start gate: each
     // switches to the shadow map and back, ~17 us, and the frame rate fell by a quarter. Now that a
-    // held-back draw gets the constant attributes it was drawn with, only your own rider and bike are
-    // still cast as drawn - your own shadow stays right whatever else a repeat might miss.)
+    // held-back draw gets the constant attributes it was drawn with, every bike's parts are held back -
+    // your own too: cast as drawn, a part at a time, a bike of many parts (the Screamin Zuki's 25, a
+    // KTM's) stuttered where one of few (the YZ's 15) didn't. Your rider's own pieces are skinned: never
+    // here (StaticDraw), cast as drawn with what the game leaves out of you.)
+    // (Tests: MXCAM_TEST_OWN_IMMEDIATE - your bike cast as drawn again, as it was, to compare.)
+    static const bool ownImmediate = GetEnvironmentVariableA("MXCAM_TEST_OWN_IMMEDIATE", nullptr, 0) > 0;
+    if (!ownImmediate)
+        return true;
     const float at[3] = { uploaded[12], uploaded[13], uploaded[14] };
     float you[3];
     if (!postfx::OwnRiderEye(you))
@@ -2952,7 +2958,12 @@ bool CanHoldBack(const DrawCall& draw, const GLfloat uploaded[16])
 
 DeferredCaster MakeCaster(const DrawCall& draw, GLint modelviewLoc, GLint projectionLoc);
 
-// Another rider's skinned draw, held back with a copy of its bones (CastShadow). anchorEye: where its
+// Your rider's pieces the game leaves out, held back along with one of yours it draws (see
+// DrawRealBodyAlong, defined below). Returns how many.
+unsigned g_realBodyFrame = 0;
+int HoldBackRealBody(const SkinnedProgram* skin, const DeferredCaster& drawn);
+
+// A rider's skinned draw, held back with a copy of its bones (CastShadow). anchorEye: where its
 // first bone is, in eye space. False: cast it as drawn.
 bool HoldBackRider(const DrawCall& draw, const float* anchorEye, const float lightModelview[16], unsigned cascades,
                    GLint modelviewLoc, GLint projectionLoc)
@@ -2963,17 +2974,55 @@ bool HoldBackRider(const DrawCall& draw, const float* anchorEye, const float lig
         return false;
     const int n = skin->bones;
     if (n < 1 || n > kMaxBones || skin->centres < n || skin->positions < n || skin->rotations < n || skin->centreLoc < 0 ||
-        skin->positionLoc < 0 || skin->rotationLoc < 0 || skin->countLoc < 0 || skin->positionEdited || skin->rotationEdited)
+        skin->positionLoc < 0 || skin->rotationLoc < 0 || skin->countLoc < 0)
+        return false;
+    // (Tests: MXCAM_TEST_OWN_RIDER_IMMEDIATE - your own rider cast as drawn again, as it was, to compare.)
+    static const bool ownImmediate = GetEnvironmentVariableA("MXCAM_TEST_OWN_RIDER_IMMEDIATE", nullptr, 0) > 0;
+    if (ownImmediate && (skin->positionEdited || skin->rotationEdited))
         return false;
     if (!StaticBuffers(draw) || !VertexArraySteady() || g_deferredCasters.size() >= 8192)
         return false;
-    float you[3];
-    if (!postfx::OwnRiderEye(you))
-        return false;  // (yours not placed yet: nothing is told apart from it)
-    const float dx = anchorEye[0] - you[0], dy = anchorEye[1] - you[1], dz = anchorEye[2] - you[2];
-    const float reach = static_cast<float>(kWithRiderMetres * 3.2808);
-    if (dx * dx + dy * dy + dz * dz < reach * reach)
-        return false;
+    // Your own rider's pieces too: each cast as drawn cost little in itself, but switching to the
+    // shadow map asks GL where the game is drawing, and that waits for the driver to catch up with
+    // everything the game sent before it - ~0.15 ms each, ~1 ms a frame for your rider's pieces.
+    // Held back, they're drawn with the game's own bones (hidden by Hide torso & head, the program
+    // holds ours: skin->position keeps the game's), and in first person what the game leaves out of
+    // you goes along with the piece at your hips (HoldBackRealBody), as it was drawn along before.
+    // A piece is yours when one of its bones is within 0.75 m of your rider's hips (where postfx
+    // found your rider, in this view). (Your hips not known: anything within 4 m of you cast as
+    // drawn, as it was. Tests: MXCAM_TEST_RIDER_4M - that rule always, to compare.)
+    static const bool fourMetres = GetEnvironmentVariableA("MXCAM_TEST_RIDER_4M", nullptr, 0) > 0;
+    float hips[3];
+    const auto mv = g_programModelview.find(g_program);
+    bool yours = false, atHips = false;
+    if (!fourMetres && postfx::OwnHipsEye(hips) && mv != g_programModelview.end()) {
+        const GLfloat* m = mv->second.uploaded;
+        const float close = static_cast<float>(0.75 * 3.2808), tight = static_cast<float>(0.05 * 3.2808);
+        for (int b = 0; b < n; ++b) {
+            const GLfloat* p = skin->position + b * 3;
+            float d2 = 0;
+            for (int r = 0; r < 3; ++r) {
+                const float e = m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r] - hips[r];
+                d2 += e * e;
+            }
+            yours = yours || d2 < close * close;
+            atHips = atHips || d2 < tight * tight;
+        }
+        if (yours && ownImmediate)
+            return false;  // (yours: cast as drawn)
+        if (!yours && (skin->positionEdited || skin->rotationEdited))
+            return false;  // (another's with bones of ours: never so far - cast as drawn, as it was)
+    } else {
+        if (skin->positionEdited || skin->rotationEdited)
+            return false;
+        float you[3];
+        if (!postfx::OwnRiderEye(you))
+            return false;  // (yours not placed yet: nothing is told apart from it)
+        const float dx = anchorEye[0] - you[0], dy = anchorEye[1] - you[1], dz = anchorEye[2] - you[2];
+        const float reach = static_cast<float>(kWithRiderMetres * 3.2808);
+        if (dx * dx + dy * dy + dz * dz < reach * reach)
+            return false;
+    }
     DeferredCaster c = MakeCaster(draw, modelviewLoc, projectionLoc);
     std::copy(lightModelview, lightModelview + 16, c.lightModelview);
     c.cascades = cascades;
@@ -2986,11 +3035,30 @@ bool HoldBackRider(const DrawCall& draw, const float* anchorEye, const float lig
     c.bones = static_cast<int>(g_casterBones.size());
     g_casterBones.push_back(bones);
     g_deferredCasters.push_back(c);
-    static bool logged = false;
-    if (!logged) {
+    static bool logged = false, loggedYours = false;
+    if (!yours && !logged) {
         logged = true;
         Log("postfx: shadow map: other riders' bodies are held back with their bones and cast in one go (program %u, %d bones)",
             g_program, n);
+    }
+    if (yours && !loggedYours) {
+        loggedYours = true;
+        Log("postfx: shadow map: your rider's body is held back with its bones and cast with the rest (program %u, %d bones%s)",
+            g_program, n, skin->positionEdited || skin->rotationEdited ? ", the game's bones under your hidden torso" : "");
+    }
+    // In first person, the pieces of you the game leaves out: along with the first piece of yours at your hips.
+    if (atHips && g_realBodyFrame != g_frameNumber && postfx::CameraAtYourHead()) {
+        const int along = HoldBackRealBody(skin, c);
+        if (along > 0) {
+            g_realBodyFrame = g_frameNumber;
+            postfx::NoteRealBodyDrawn(along);
+            static bool loggedAlong = false;
+            if (!loggedAlong) {
+                loggedAlong = true;
+                Log("postfx: shadow map: %d piece(s) of your rider the game leaves out (your body) held back along with one it "
+                    "draws, with your rider's own bones", along);
+            }
+        }
     }
     return true;
 }
@@ -3272,7 +3340,6 @@ bool TooBigToCast(const DrawCall& draw, const GLfloat uploaded[16])
 // Repeated later instead, from what was kept (CastRiderPieces), they were drawn but came out invisible
 // in the game: your first-person shadow had no torso. Once a frame, inside the caller's shadow draw,
 // into the cascade it's drawing now. Returns how many were drawn.
-unsigned g_realBodyFrame = 0;
 int DrawRealBodyAlong(const SkinnedProgram* skin, bool firstCascade)
 {
     if (!skin || skin->bones <= 0 || skin->centres < skin->bones || skin->positions < skin->bones ||
@@ -3324,6 +3391,58 @@ int DrawRealBodyAlong(const SkinnedProgram* skin, bool firstCascade)
         real_glUniform1i(skin->countLoc, skin->bones);
     }
     return drawn;
+}
+
+// The same, held back instead (HoldBackRider): each left-out piece as the piece of yours just held
+// back - its program, textures, uniforms, attributes, matrices and cascades - with its own vertex
+// array and draw call, and its bones taken from that piece's by their rest positions.
+int HoldBackRealBody(const SkinnedProgram* skin, const DeferredCaster& drawn)
+{
+    if (!skin || skin->bones <= 0 || skin->centres < skin->bones || skin->positions < skin->bones ||
+        skin->rotations < skin->bones)
+        return 0;
+    const double same = 1e-3 * 3.2808;
+    int held = 0;
+    for (const KeptRiderPiece& piece : g_riderPieces) {
+        if (!piece.used || !piece.leftOut || piece.count <= 0 || piece.count > kMaxBones)
+            continue;
+        if (g_deferredCasters.size() >= 8192)
+            break;
+        const auto element = g_elementBuffers.find(piece.caster.vao);
+        if (piece.caster.draw.kind != DrawCall::Arrays &&
+            (element == g_elementBuffers.end() || element->second != piece.caster.elementBuffer))
+            continue;  // (its vertex array was given other indices since)
+        CasterBones bones;
+        bones.count = piece.count;
+        bones.transposed = skin->transposed;
+        bool all = true;
+        for (int b = 0; b < piece.count && all; ++b) {
+            const GLfloat* c = piece.centre + b * 3;
+            bool found = false;
+            for (int k = 0; k < skin->bones && !found; ++k) {
+                const GLfloat* o = skin->centre + k * 3;
+                if (std::fabs(o[0] - c[0]) + std::fabs(o[1] - c[1]) + std::fabs(o[2] - c[2]) > same)
+                    continue;
+                found = true;
+                std::copy(o, o + 3, bones.centre + b * 3);
+                std::copy(skin->position + k * 3, skin->position + k * 3 + 3, bones.position + b * 3);
+                std::copy(skin->rotation + k * 9, skin->rotation + k * 9 + 9, bones.rotation + b * 9);
+            }
+            all = found;
+        }
+        if (!all)
+            continue;
+        DeferredCaster c = drawn;
+        c.vao = piece.caster.vao;
+        c.elementBuffer = piece.caster.elementBuffer;
+        c.draw = piece.caster.draw;
+        c.vaoGen = g_vaoGeneration[c.vao];
+        c.bones = static_cast<int>(g_casterBones.size());
+        g_casterBones.push_back(bones);
+        g_deferredCasters.push_back(c);
+        ++held;
+    }
+    return held;
 }
 
 void CastShadow(const DrawCall& draw)
@@ -3458,8 +3577,9 @@ void CastShadow(const DrawCall& draw)
     if (nearYou)
         postfx::NoteNearCast(CanHoldBack(draw, mv->second.uploaded) ? 5 : 1);  // (5: held back to be repeated later)
 
-    // Static scenery (not skinned, its geometry in buffers nothing rewrites while running): held
-    // back and drawn with the others in one go before the shadows are applied (FlushShadowCasters).
+    // Static scenery and every bike's parts (not skinned, its geometry in buffers nothing rewrites
+    // while running): held back and drawn with the others in one go before the shadows are applied
+    // (FlushShadowCasters).
     if (CanHoldBack(draw, mv->second.uploaded)) {
         DeferredCaster c = MakeCaster(draw, mv->second.location, projection->second.location);
         std::copy(lightModelview, lightModelview + 16, c.lightModelview);
@@ -3470,11 +3590,11 @@ void CastShadow(const DrawCall& draw)
             return;
         }
     }
-    // Another rider's body (skinned: its bones change from draw to draw, so not held back above):
+    // A rider's body (skinned: its bones change from draw to draw, so not held back above):
     // held back too, with a copy of the bones it was drawn with, and drawn with them again in the
     // batch, as the pieces of your rider the game leaves out are. Each cast one at a time switched
-    // to the shadow map and back (~15-20 us): a lobby's riders cost ~90 of those a frame. Never your
-    // own (within kWithRiderMetres of you: cast as drawn, below), nor a vertex array the game re-points.
+    // to the shadow map and back (~15-20 us): a lobby's riders cost ~90 of those a frame. Your own too
+    // (with what the game leaves out of you); never a vertex array the game re-points.
     if (HoldBackRider(draw, anchorEye, lightModelview, cascades, mv->second.location, projection->second.location)) {
         postfx::NoteCast(5);
         return;
@@ -5667,9 +5787,11 @@ void CastRiderPieces(const postfx::OwnAnchors& own)
         piece.leftOut = piece.used && !whole && piece.drawnFrame != g_riddenFrame;
 
     // The pieces left out: each bone by its rest position, from whichever of this frame's draws has it.
+    // (Tests: MXCAM_TEST_NO_KEPT_PIECES - not these, to see the ones drawn along on their own.)
+    static const bool noKept = GetEnvironmentVariableA("MXCAM_TEST_NO_KEPT_PIECES", nullptr, 0) > 0;
     const double same = 1e-3 * u;
     for (KeptRiderPiece& piece : g_riderPieces) {
-        if (!piece.used || piece.drawnFrame == g_riddenFrame || whole)
+        if (!piece.used || piece.drawnFrame == g_riddenFrame || whole || noKept)
             continue;
         if (g_deferredCasters.size() >= 8192)
             break;

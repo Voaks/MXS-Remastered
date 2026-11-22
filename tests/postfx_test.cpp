@@ -391,7 +391,7 @@ int main(int argc, char** argv)
         settings = base.replace(base.find("Shadows=0"), 9, "Shadows=1\nShadowMap=1\nShadowDistanceM=150\nShadowResolution=0");
     else if (mode == "oldshadow")  // an ini from before: ShadowDistance in feet (said m), ShadowMapSize
         settings = base.replace(base.find("Shadows=0"), 9, "Shadows=1\nShadowMap=1\nShadowDistance=60\nShadowMapSize=4096");
-    else if (mode == "headshadow")  // first person: your helmet isn't drawn, a ball stands in for it in the shadow map
+    else if (mode == "headshadow" || mode == "bodyshadow")  // first person: your helmet isn't drawn, a ball stands in for it in the shadow map
         settings = base.replace(base.find("Shadows=0"), 9, "Shadows=1\nShadowMap=1");
     else if (mode == "hidehud")  // the HUD hidden while riding at once, shown with the game's menu (Esc)
         settings = base + "[Other]\nHideHud=1\n";
@@ -765,7 +765,11 @@ int main(int argc, char** argv)
     // the box's shadow falls on the ground to its left.
     // For the shadow map check: low, from behind, so a tower behind the camera (never on screen)
     // throws its shadow forward onto the visible ground.
-    const bool headShadow = mode == "headshadow";
+    // bodyshadow: as headshadow, with a torso piece of your rider
+    // drawn for the first 15 frames only (in first person the game leaves it out): cast after that
+    // along with the piece the game still draws.
+    const bool bodyShadow = mode == "bodyshadow";
+    const bool headShadow = mode == "headshadow" || bodyShadow;
     const bool farTower = mode == "longshadow" || mode == "oldshadow" || mode == "longsharp";
     const float sunEye[3] = { mode == "shadows" ? 0.8f : mode == "backshadow" ? 0.25f : (mode == "offscreen" || stadium || hillTree || decal) || farTower ? 0.0f : headShadow ? -0.5f : 0.3f,
                               mode == "shadows" ? 0.6f : mode == "backshadow" ? 0.95f : (mode == "offscreen" || stadium || hillTree || decal) || farTower ? 0.15f : headShadow ? 0.17f : 0.8f,
@@ -1018,7 +1022,7 @@ int main(int argc, char** argv)
         // Its body isn't drawn on screen here (only its bones matter), and no helmet is drawn at all.
         if (headShadow && rider) {
             const float facing[9] = { 1, 0, 0,  0, 1, 0,  0, 0, 1 };
-            Rider(facing, 0.0f, 0.565f, -0.2f);
+            Rider(facing, 0.0f, 0.565f, -0.2f, 1.0f, bodyShadow && frameIndex < 15);
         }
 
         // Third person: your rider a few metres ahead of the camera, riding away from it.
@@ -2250,6 +2254,21 @@ int main(int argc, char** argv)
             Check(log.find(kept) != std::string::npos, (std::string("the ") + wheel + " wheel's draw call is kept while it's drawn").c_str());
             Check(log.find(cast) != std::string::npos, (std::string("the ") + wheel + " wheel still casts a shadow once it isn't drawn").c_str());
         }
+    } else if (bodyShadow) {
+        // (Its shadow's shape is the stand-ins' - learnt from this small torso piece - so only that
+        // the piece left out after frame 15 was cast along with the one still drawn. Compare its
+        // frame with MXCAM_TEST_OWN_RIDER_IMMEDIATE: the same, pixel for pixel.)
+        std::string log;
+        FILE* in = _wfsopen((dir + L"MXS_REMASTERED.log").c_str(), L"rb", _SH_DENYNO);
+        if (in) {
+            char buffer[4096];
+            size_t got;
+            while ((got = fread(buffer, 1, sizeof buffer, in)) > 0)
+                log.append(buffer, got);
+            fclose(in);
+        }
+        Check(log.find("piece(s) of your rider the game leaves out (your body)") != std::string::npos,
+              "the torso piece left out is cast along with the piece still drawn");
     } else if (headShadow) {
         // Where the head's shadow lands: from the middle of the head (about the eye) along the sun
         // down to the ground, onto the screen; and the same spot mirrored to the left (in the sun).
