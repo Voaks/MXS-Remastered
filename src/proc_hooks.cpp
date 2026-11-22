@@ -1507,7 +1507,9 @@ void SetArmFade(const SkinnedProgram& skin, bool complete)
         return;
     const Config& cfg = GetConfig();
     float want = 0.0f;
-    if (complete && cfg.enabled && cfg.shaders && cfg.armFade > 0.0) {
+    // (Not tied to Shaders: the model shader carries the fade whatever the effects are set to - a
+    // first person setting, as Hide torso & head. With Shaders off it did nothing.)
+    if (complete && cfg.enabled && cfg.armFade > 0.0) {
         bool hidden[kMaxBones] = {};
         double rest[3] = {}, size = 0;
         GLfloat arm[12];
