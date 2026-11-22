@@ -3876,7 +3876,7 @@ void BuildPanel(int screenWidth, int screenHeight, const Input& in, double now)
             Text(kFontSmall, px2 + std::round((pasteW - TextWidth(kFontSmall, pasteLabel, S(2))) * 0.5f),
                  fy + std::round((fh - LineHeight(kFontSmall)) * 0.5f), pasteLabel, busy ? kDim : White(1.0f), S(2));
             OfferHelp("Copy someone's setup code first (from Discord or anywhere: the whole message is fine), then press this "
-                      "on a track: it's saved as a new setup - under the name typed here, else \"shared\" - and LOAD puts it on "
+                      "on a track: it's saved as a new setup - under the name typed here, else the name it had - and LOAD puts it on "
                       "your bike. Only the bike and its tuning are theirs: your name, number, gear, controls, stability, auto "
                       "clutch, brakes and dab speed are read from your bike as it is. None of your setups is ever written over.",
                       fy, fy + fh, px2, pasteW, in.Inside(px2, fy, pasteW, fh), false);
@@ -4976,7 +4976,16 @@ void LapTimerUpdate(double now)
 // Draws the lap timer over this frame (the menu closed), and moves it as it's dragged.
 void LapTimerFrame(HWND window, double now)
 {
-    if (!GetConfig().lapTimer || !SceneOnScreen() || GameMenuOverScene()) {
+    // Hidden off the race (the game's menus, no 3D scene) and while the game's own menu is seen over it
+    // - only once that has lasted a quarter of a second: a frame or a few of either (a chance match of
+    // the menu's draws, a frame with no 3D view) had it flicker out and in.
+    static double hiddenSince = -1.0;
+    const bool hide = !SceneOnScreen() || GameMenuPageShown();
+    if (!hide)
+        hiddenSince = -1.0;
+    else if (hiddenSince < 0.0)
+        hiddenSince = now;
+    if (!GetConfig().lapTimer || (hide && now - hiddenSince >= 0.25)) {
         SetTimerHot(0, 0, 0, 0);
         g_timerDrag = TimerDrag{};
         return;

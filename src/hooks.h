@@ -84,6 +84,9 @@ bool SceneOnScreen();
 // The game's own menu (Esc) is open over the 3D scene: the HUD and cursor are left alone with it.
 bool GameMenuOverScene();
 
+// The same, only while a page of it is seen drawn (not on Esc alone: an Esc can be the chat's).
+bool GameMenuPageShown();
+
 // For the OTHER tab: what hiding the game's HUD and cursor is doing ("" when both are off).
 const char* GameOverlayStatusText();
 

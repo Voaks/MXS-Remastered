@@ -1157,6 +1157,7 @@ struct GameMenuWatch {
     int  window = 0;        // frames learnt over so far (in windows of kMenuLearnFrames)
     int  absent = 0;        // frames in a row its draws weren't seen, after they were
     int  unseenOpen = 0;    // frames open without its draws seen (once they're known)
+    int  pageFrames = 0;    // frames in a row a learnt page was drawn (3 to open it by that alone)
     bool loggedOpen = false, loggedLearnt = false;
 };
 GameMenuWatch g_gameMenu;
@@ -1216,7 +1217,12 @@ void UpdateGameMenu()
             m.loggedOpen = true;
     }
     const bool learnt = !m.pages.empty();
-    if (learnt && MenuPageDrawn()) {
+    // (A page drawn on its own opens it only on 3 frames in a row: one frame's flat draws matching one by
+    // chance - a HUD message - opened it for 6 frames every few seconds, and the hidden HUD and the lap
+    // timer flickered with it. Once it's open, a frame of its page keeps it so.)
+    const bool pageDrawn = learnt && MenuPageDrawn();
+    m.pageFrames = pageDrawn ? m.pageFrames + 1 : 0;
+    if (pageDrawn && (m.open || m.pageFrames >= 3)) {
         if (!m.open)
             LogGameMenu("is open (a page of it is drawn)");
         m.open = true;
@@ -6586,6 +6592,11 @@ bool SceneOnScreen()
 bool GameMenuOverScene()
 {
     return g_gameMenu.open;
+}
+
+bool GameMenuPageShown()
+{
+    return g_gameMenu.open && g_gameMenu.sawMenu;
 }
 
 const char* GameOverlayStatusText()

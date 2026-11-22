@@ -376,7 +376,9 @@ bool ValidName(const std::string& name)
 namespace {
 
 constexpr char    kSetupPrefix[] = "MXS-REMASTERED-SET-";
-constexpr uint8_t kSetupVersion  = 1;
+// (Version 2: the setup's own name after the bike - pasted under it. Version 1 codes, without it, still
+// load: as "shared".)
+constexpr uint8_t kSetupVersion  = 2;
 constexpr char    kSetupBase64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 // The game's tuning lines, in the order its setup files have them. (Added to at the end only: codes
 // already shared name lines by their place here.)
@@ -482,6 +484,7 @@ std::string SetupCode(const std::string& name)
             bike = kv.second;
     std::vector<uint8_t> bytes{ kSetupVersion };
     PutText(bytes, bike);
+    PutText(bytes, name);
     for (const auto& kv : lines) {
         if (kv.first == "bike" || IsPersonal(kv.first))
             continue;
@@ -518,6 +521,7 @@ namespace {
 // A setup code, read: its bike and its tuning lines (never a personal one, whatever it says).
 struct DecodedSetup {
     std::string                                      bike;
+    std::string                                      name;  // the setup's own name (version 2 on; "" before)
     std::vector<std::pair<std::string, std::string>> tuning;
 };
 
@@ -550,8 +554,9 @@ PastedSetup::Status DecodeSetup(const char* text, DecodedSetup& out)
     bytes.pop_back();
     if (SetupChecksum(bytes) != sum)
         return PastedSetup::Damaged;
-    if (bytes[0] != kSetupVersion)
+    if (bytes[0] < 1 || bytes[0] > kSetupVersion)
         return PastedSetup::Newer;
+    const uint8_t version = bytes[0];
     // Its lines.
     size_t at = 1;
     const auto Text = [&](std::string& out) {
@@ -561,7 +566,7 @@ PastedSetup::Status DecodeSetup(const char* text, DecodedSetup& out)
         at += 1 + bytes[at];
         return true;
     };
-    if (!Text(result.bike))
+    if (!Text(result.bike) || (version >= 2 && !Text(result.name)))
         return PastedSetup::Damaged;
     while (at < bytes.size()) {
         const uint8_t which = bytes[at++];
@@ -620,7 +625,8 @@ PastedSetup WriteShared(const DecodedSetup& d, const std::wstring& own, const st
         return result;
     }
     const std::filesystem::path folder(Folder());
-    const std::string base = ValidName(wantedName) ? wantedName : std::string("shared");
+    // (The name typed; else the setup's own, as its owner called it; else "shared".)
+    const std::string base = ValidName(wantedName) ? wantedName : ValidName(d.name) ? d.name : std::string("shared");
     std::string name = base;
     for (int k = 2; k < 1000; ++k) {
         std::error_code e3;

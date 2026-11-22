@@ -943,10 +943,11 @@ int main(int argc, char** argv)
     int frames = roostRun ? 2000 : rivalStep ? 700 : rivalRoost ? 320 : timing ? 160 : gateBox || wheelDrift || rival || riderFar ? 260 : hiddenWheels || rearHidden ? 200 : hideHud ? 330 : headShadow ? 40 : stadiumSwap ? 40 : 12;
     // hidehud: the game's menu over the race, a draw of its own (another texture) right of the HUD.
     // Esc opens it (frames 100-199), Esc closes it; then it's opened and closed without Esc (frames
-    // 230-299: a click in it). The HUD and the menu are sampled on the frames below.
-    const int hudFrames[5] = { 3, 180, 220, 290, 325 };
-    const bool hudShownAt[5] = { false, true, false, true, false };
-    Pixel hudAt[5] = {}, menuAt[5] = {};
+    // 230-299: a click in it). The HUD and the menu are sampled on the frames below. At frame 315 the
+    // menu's draws flash for one frame alone (flat draws matching its page by chance): never the menu.
+    const int hudFrames[6] = { 3, 180, 220, 290, 318, 325 };
+    const bool hudShownAt[6] = { false, true, false, true, false, false };
+    Pixel hudAt[6] = {}, menuAt[6] = {};
     GLuint menuTextures[3] = {};  // the menu: three draws of its own (a panel, its text, a button)
     if (hideHud)
         p_glGenTextures(3, menuTextures);
@@ -1553,7 +1554,7 @@ int main(int argc, char** argv)
                 gl.Uniform3fv(oColor, 1, white);
                 p_glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, nullptr);
             }
-            if ((frameIndex >= 100 && frameIndex < 200) || (frameIndex >= 230 && frameIndex < 300)) {
+            if ((frameIndex >= 100 && frameIndex < 200) || (frameIndex >= 230 && frameIndex < 300) || frameIndex == 315) {
                 const float menuMv[16] = { 0.05f, 0, 0, 0, 0, 0.05f, 0, 0, 0, 0, 0.05f, 0, 0.3f, 0.3f, -1, 1 };
                 const float green[3] = { 0.1f, 0.9f, 0.1f };
                 GLint wasBound = 0;
@@ -1568,7 +1569,7 @@ int main(int argc, char** argv)
                 p_glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(wasBound));
                 gl.ActiveTexture(0x84C0 + 2);
             }
-            for (int k = 0; k < 5; ++k) {
+            for (int k = 0; k < 6; ++k) {
                 if (frameIndex != hudFrames[k])
                     continue;
                 unsigned char px[3];
@@ -1698,9 +1699,11 @@ int main(int argc, char** argv)
     const Pixel drawnSky{ 102, 153, 217 }, drawnGround{ 115, 92, 69 }, drawnBox{ 204, 26, 26 };
     if (hideHud) {
         Check(Near(hudPixel, drawnSky, 12), "the HUD is hidden while riding (the sky shows where it was)");
-        static const char* const kWhen[5] = { "from the start", "with the game's menu open (Esc)", "once Esc closed the menu",
-                                              "with the menu open again (no Esc)", "once the menu closed (no Esc)" };
-        for (int k = 0; k < 5; ++k) {
+        static const char* const kWhen[6] = { "from the start", "with the game's menu open (Esc)", "once Esc closed the menu",
+                                              "with the menu open again (no Esc)",
+                                              "3 frames after the menu's draws flashed for one frame (not the menu: no flicker)",
+                                              "once the menu closed (no Esc)" };
+        for (int k = 0; k < 6; ++k) {
             printf("    frame %d: HUD %d %d %d, menu %d %d %d\n", hudFrames[k], hudAt[k].r, hudAt[k].g, hudAt[k].b, menuAt[k].r,
                    menuAt[k].g, menuAt[k].b);
             const bool white = hudAt[k].r == 255 && hudAt[k].g == 255 && hudAt[k].b == 255;
