@@ -2150,16 +2150,18 @@ constexpr char kArmFragmentApply[] =
     "\t\t\tdiscard;\n"
     "\t}\n";
 
-// RIDER DIRT (u_mx_bodyp.w set: your own rider's gear, see OwnRiderDraw): the same mud, as much all over
-// the rider (the user: it should grow the same all around, not from the feet up) - in patches on the
-// gear's own rest pose (mx_pos: it stays on the gear as it moves) - a little more on what faces forward
-// (the rider stands in a T at rest, facing its -z) and down, a little less on what faces up. Which way
-// the surface faces at rest: from the triangle's own slope in mx_pos, turned outwards as the view's own
-// slope says.
+// RIDER DIRT (u_mx_bodyp.w: 1 your rider's body, 2 your helmet; see OwnRiderDraw): the same mud, growing
+// all over the rider together (the user: not from the feet up) - in patches on the gear's own rest pose
+// (mx_pos: it stays on the gear as it moves) - more on the boots and shins (at rest, under the knees:
+// u_mx_rleg), less on the helmet, a little more on what faces forward (the rider stands in a T at rest,
+// facing its -z) and down, a little less on what faces up. Its own amount curve: gentler, and patchier,
+// so even at 100% it's caked patches, smears and cleaner gaps - never one brown coat (the user). Which
+// way the surface faces at rest: from the triangle's own slope in mx_pos, turned outwards as the view's
+// own slope says.
 constexpr char kBodyFragmentApply[] =
     "\tif (u_mx_body > 0.0) {\n"
     "\t\thighp vec3 mx_q = mx_pos * (1.0 / u_mx_metre);\n"
-    "\t\tfloat mx_reach, mx_up, mx_base = 0.55;\n"
+    "\t\tfloat mx_reach, mx_up, mx_base = 0.55, mx_gain = 1.3, mx_cube = 0.4, mx_spread = 0.8, mx_filmk = 1.0, mx_amt = u_mx_body;\n"
     "\t\thighp vec3 mx_sq = mx_q;\n"
     "\t\tif (u_mx_bodyp.w > 0.5) {\n"
     "\t\t\thighp vec3 mx_rn = cross(dFdx(mx_pos), dFdy(mx_pos));\n"
@@ -2167,8 +2169,16 @@ constexpr char kBodyFragmentApply[] =
     "\t\t\tmx_rn = dot(mx_rn, mx_rn) > 0.0 ? normalize(mx_rn) * (dot(mx_vn, interp_normal) < 0.0 ? -1.0 : 1.0) : vec3(0.0);\n"
     "\t\t\tfloat mx_front = smoothstep(0.05, 0.7, -mx_rn.z);\n"
     "\t\t\tmx_up = smoothstep(0.35, 0.9, mx_rn.y);\n"
-    "\t\t\tmx_reach = clamp(0.5 + 0.08 * mx_front + 0.08 * smoothstep(0.2, 0.8, -mx_rn.y) - 0.06 * mx_up, 0.0, 1.0);\n"
-    "\t\t\tmx_base = 0.3;\n"
+    "\t\t\tfloat mx_s = (mx_pos.y - u_mx_rleg.x) / max(u_mx_rleg.z - u_mx_rleg.x, 1e-3);\n"
+    "\t\t\tfloat mx_boot = u_mx_bodyp.w > 1.5 ? 0.0 : 1.0 - smoothstep(0.32, 0.6, mx_s);\n"
+    "\t\t\tmx_reach = (u_mx_bodyp.w > 1.5 ? 0.36 : 0.48 + 0.4 * mx_boot) + 0.08 * mx_front + 0.08 * smoothstep(0.2, 0.8, -mx_rn.y) - 0.06 * mx_up;\n"
+    "\t\t\tmx_reach = clamp(mx_reach, 0.0, 1.0);\n"
+    "\t\t\tmx_base = 0.15;\n"
+    "\t\t\tmx_gain = 0.85;\n"
+    "\t\t\tmx_cube = 0.1;\n"
+    "\t\t\tmx_spread = 1.05;\n"
+    "\t\t\tmx_filmk = 0.6;\n"
+    "\t\t\tmx_amt = pow(u_mx_body, 0.75);\n"
     "\t\t} else {\n"
     "\t\thighp vec3 mx_b = (u_mx_tobike * vec4(mx_pos, 1.0)).xyz;\n"
     "\t\tvec3 mx_bn = normalize(u_mx_bikeview * normalize(interp_normal));\n"
@@ -2189,14 +2199,14 @@ constexpr char kBodyFragmentApply[] =
     "\t\tfloat mx_patch = mx_noise(mx_q * 4.0 + 5.0) * 0.6 + mx_noise(mx_q * 9.0 + 17.0) * 0.4;\n"
     "\t\tfloat mx_clump = mx_noise(mx_q * 22.0 + 3.0) * 0.55 + mx_noise(mx_q * 51.0 + 9.0) * 0.3 + mx_noise(mx_q * 120.0 + 21.0) * 0.15;\n"
     "\t\tfloat mx_streak = mx_noise(mx_q * vec3(14.0, 1.6, 14.0) + 61.0);\n"
-    "\t\tfloat mx_t = u_mx_body * 1.3 * (0.25 + mx_reach) + 0.4 * u_mx_body * u_mx_body * u_mx_body - 0.48 + (mx_patch - 0.5) * 0.8 +\n"
+    "\t\tfloat mx_t = mx_amt * mx_gain * (0.25 + mx_reach) + mx_cube * mx_amt * mx_amt * mx_amt - 0.48 + (mx_patch - 0.5) * mx_spread +\n"
     "\t\t             (mx_clump - 0.5) * 0.35;\n"
     "\t\tfloat mx_thick = smoothstep(0.42, 0.6, mx_t);\n"
     "\t\tfloat mx_smear = smoothstep(0.16, 0.42, mx_t) * (1.0 - mx_thick);\n"
-    "\t\tfloat mx_film = clamp(u_mx_body * (mx_base + 0.7 * mx_reach + 0.25 * mx_up) * (0.6 + 0.8 * mx_streak), 0.0, 1.0);\n"
+    "\t\tfloat mx_film = clamp(mx_amt * mx_filmk * (mx_base + 0.7 * mx_reach + 0.25 * mx_up) * (0.6 + 0.8 * mx_streak), 0.0, 1.0);\n"
     // (flecks: round drops of mud in three sizes, a little drawn out along the bike - flung back off the
     // wheels - many near the wheels and low down, few up top; each size faded out once it's under a pixel)
-    "\t\tfloat mx_dens = clamp(u_mx_body * (0.15 + 1.1 * mx_reach) - 0.08, 0.0, 0.9);\n"
+    "\t\tfloat mx_dens = clamp(mx_amt * (0.15 + 1.1 * mx_reach) - 0.08, 0.0, 0.9);\n"
     "\t\tfloat mx_fw = length(fwidth(mx_sq));\n"
     "\t\tfloat mx_fleck = max(max(mx_dot(mx_sq * 45.0, mx_dens, 45.0 * mx_fw), mx_dot(mx_sq * 75.0 + 13.0, mx_dens, 75.0 * mx_fw)),\n"
     "\t\t                     mx_dot(mx_sq * 120.0 + 29.0, mx_dens * 1.2, 120.0 * mx_fw));\n"
@@ -5249,10 +5259,11 @@ void PaintBikeDirt(const DrawCall& draw, bool tire)
                            skin->positions >= skin->bones && skin->rotations >= skin->bones && skin->haveView;
     const bool riderDirtOn = !tire && cfg.shaders && cfg.riderDirt > 0.0 && real_glUniform4fv && p.params >= 0;
     // (Your rider's gear and helmet: the rider dirt's look, the same all over.)
-    const auto RiderLook = [&]() {
+    // (which: 1 your rider's body, 2 your helmet - less on it: the user's "the helmet gets too much".)
+    const auto RiderLook = [&](float which) {
         postfx::WetLook look;
         const float wet = postfx::GetWetLook(look) ? std::min(1.0f, look.wet) : 0.0f;
-        const float params[4] = { 0.0f, wet, cfg.weather == kWeatherSnow ? 1.0f : 0.0f, 1.0f };
+        const float params[4] = { 0.0f, wet, cfg.weather == kWeatherSnow ? 1.0f : 0.0f, which };
         if (std::memcmp(params, p.paramsSet, sizeof params) != 0) {
             real_glUniform4fv(p.params, 1, params);
             std::memcpy(p.paramsSet, params, sizeof params);
@@ -5268,7 +5279,7 @@ void PaintBikeDirt(const DrawCall& draw, bool tire)
     if (riderDraw) {
         GLfloat leg[4], arm[4];
         if (riderDirtOn && OwnRiderDraw(*skin, leg, arm)) {
-            RiderLook();
+            RiderLook(1.0f);
             if (p.rleg >= 0)  // (the rider's measure: not used by the shader now - its dirt is the same all over)
                 real_glUniform4fv(p.rleg, 1, leg);
             if (p.rarm >= 0)
@@ -5281,7 +5292,7 @@ void PaintBikeDirt(const DrawCall& draw, bool tire)
             }
         }
     } else if (riderDirtOn && skin && skin->bones == 0 && OwnHelmetDraw(draw)) {
-        RiderLook();
+        RiderLook(2.0f);
         static std::vector<int> logged;
         if (logged.size() < 8 && std::find(logged.begin(), logged.end(), draw.count) == logged.end()) {
             logged.push_back(draw.count);

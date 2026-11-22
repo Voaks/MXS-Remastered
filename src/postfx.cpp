@@ -5891,7 +5891,13 @@ void Roost(const double V[16], const double P[16], Vec3 eye, Vec3 up, Vec3 water
     g_roostLastEye = eye;
     g_roostHaveEye = true;
 
-    const RoostThrow yours = EmitRoost(rear.contact, forward, g_rider.velocity, g_roostAccel, riding && rear.grounded, up, step,
+    // (Thrown only with your rear tire on the ground as the marks have it AND your bike not falling
+    // freely - the tires' sounds' own reading of the air, off your bike's fall: the marks' tire, put
+    // back on the ground for a moment in the middle of a flight, threw roost and spray from it in the
+    // air. What was thrown before the lip flies on behind you.)
+    double airSpeed = 0.0;
+    const bool tiresDown = TiresRolling(airSpeed);  // (read once a frame, whoever asks)
+    const RoostThrow yours = EmitRoost(rear.contact, forward, g_rider.velocity, g_roostAccel, riding && rear.grounded && tiresDown, up, step,
                                        g_roostDustCarry, g_roostClodCarry, g_roostDropCarry, g_roostMistCarry);
     g_roostIntensity = yours.intensity;
     // Every other bike found by its wheels (TrackOtherBikes, as the headlights on other bikes): from its
@@ -8896,19 +8902,27 @@ void LogTireAir(bool air, double now, double speed)
     Log("%s", text);
 }
 
-bool TiresRolling(double& speed)
+// (Once a frame - the roost asks it as well as the tires' sounds: each frame of your rider found, its
+// readings once.)
+double g_tireAirFor = -1;  // the g_riderTime last read for
+bool UpdateTireAir(double& speed)
 {
     const double now = Seconds();
     TireAir& a = g_tireAir;
-    const double dt = a.last >= 0 ? Clamp(now - a.last, 0.0, 0.1) : 0.0;
-    a.last = now;
+    const Vec3 up = WorldUp();
     if (!g_rider.seen || g_riderTime < 0 || now - g_riderTime > 0.5) {
         a = TireAir{};
         a.last = now;
         g_tireAirFit.Reset();
+        g_tireAirFor = -1;
         return false;
     }
-    const Vec3 up = WorldUp();
+    speed = Length(g_rider.velocity - up * Dot(g_rider.velocity, up)) / g_unitsPerMetre;
+    if (g_riderTime == g_tireAirFor)
+        return !a.air;
+    g_tireAirFor = g_riderTime;
+    const double dt = a.last >= 0 ? Clamp(now - a.last, 0.0, 0.1) : 0.0;
+    a.last = now;
     if (!a.havePos || Length(g_rider.position - a.lastPos) > 1e-5 * g_unitsPerMetre) {
         if (a.havePos && Length(g_rider.position - a.lastPos) > 3.0 * g_unitsPerMetre)
             g_tireAirFit.Reset();  // a respawn or a cut: not a motion
@@ -8923,7 +8937,6 @@ bool TiresRolling(double& speed)
         fallG = g_bikeFallG;
     else if (g_tireAirFit.Estimate(0.15, fitVel, fitAcc))
         fallG = Clamp(Dot(fitAcc, up) / (kGravity * g_unitsPerMetre), -6.0, 6.0);
-    speed = Length(g_rider.velocity - up * Dot(g_rider.velocity, up)) / g_unitsPerMetre;
     g_tireAirLog[g_tireAirLogNext] = TireAirSample{ now, fallG, bikeFit };
     g_tireAirLogNext = (g_tireAirLogNext + 1) % static_cast<int>(sizeof g_tireAirLog / sizeof g_tireAirLog[0]);
     a.fallFor = fallG < -0.7 ? a.fallFor + dt : 0.0;
@@ -8936,6 +8949,11 @@ bool TiresRolling(double& speed)
         LogTireAir(false, now, speed);
     }
     return !a.air;
+}
+
+bool TiresRolling(double& speed)
+{
+    return UpdateTireAir(speed);
 }
 
 const char* StatusText()

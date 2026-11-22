@@ -2456,7 +2456,7 @@ int main(int argc, char** argv)
                    shin[2], hip[0], hip[1], hip[2], theirLeg[0], theirLeg[1], theirLeg[2]);
             Check(log.find("rider dirt: on your rider (program") != std::string::npos, "the log says the rider dirt went on your rider");
             Check(shin[0] - shin[2] > 25.0 && shin[0] < 170.0, "your rider's shin has mud on it (browner and darker)");
-            Check(hip[0] - hip[2] > 25.0 && hip[0] < 170.0, "as much up at its hip: the mud the same all over the rider, not from the feet up");
+            Check(shin[0] - shin[2] > hip[0] - hip[2] + 10.0 && hip[0] > shin[0] + 20.0, "more on the boots than up at the hip - and even at 100% not one brown coat");
             Check(std::fabs(theirLeg[0] - theirLeg[2]) < 8.0 && theirLeg[0] > 180.0, "the other rider, 1 m beside yours, has none");
             // Helmets: yours (behind the other rider's on screen: the log says), the other rider's (on screen).
             double theirHelmet[3];
