@@ -602,59 +602,10 @@ void NoteGameLog(const std::string& text)
     }
 }
 
-namespace {
-// The game's own log (lastlog.txt in its personal folder), read as it grows: twice a second its size,
-// and what was added since.
-struct GameLogWatch {
-    bool               started = false;
-    unsigned long long size = 0;
-    double             checkedAt = -1e9;
-};
-GameLogWatch g_gameLog;
-
-void PollGameLog(double now)
-{
-    if (g_testTracks || now - g_gameLog.checkedAt < 0.5)
-        return;
-    g_gameLog.checkedAt = now;
-    const wchar_t* folder = paths::PersonalFolder();
-    if (!folder || !folder[0])
-        return;
-    const std::filesystem::path path = std::filesystem::path(folder) / L"lastlog.txt";
-    std::error_code error;
-    const unsigned long long size = std::filesystem::file_size(path, error);
-    if (error)
-        return;
-    if (!g_gameLog.started) {  // (what it says already was before now)
-        g_gameLog.started = true;
-        g_gameLog.size = size;
-        return;
-    }
-    if (size < g_gameLog.size)
-        g_gameLog.size = 0;  // (a new log: the game started again)
-    if (size == g_gameLog.size)
-        return;
-    std::ifstream file(path, std::ios::binary);
-    if (!file)
-        return;
-    const unsigned long long from = std::max(g_gameLog.size, size > (1u << 20) ? size - (1u << 20) : 0ull);
-    file.seekg(static_cast<std::streamoff>(from));
-    std::string text(static_cast<size_t>(size - from), '\0');
-    file.read(&text[0], static_cast<std::streamsize>(text.size()));
-    text.resize(static_cast<size_t>(std::max<std::streamsize>(file.gcount(), 0)));
-    // (Up to its last whole line: the rest is read next time.)
-    const size_t end = text.rfind('\n');
-    if (end == std::string::npos)
-        return;
-    g_gameLog.size = from + end + 1;
-    NoteGameLog(text.substr(0, end + 1));
-}
-}  // namespace
 
 void Update(double now, bool have, const double position[3])
 {
     StartLoading();
-    PollGameLog(now);
     if (!g_taken && g_loadDone.load()) {
         std::lock_guard<std::mutex> lock(g_loadedMutex);
         g_tracks = std::move(g_loaded);

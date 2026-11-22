@@ -101,6 +101,7 @@
     <ClCompile Include="src\thunder.cpp" />
     <ClCompile Include="src\setups.cpp" />
     <ClCompile Include="src\dab.cpp" />
+    <ClCompile Include="src\gamelog.cpp" />
     <ClCompile Include="src\laptimer.cpp" />
     <ClCompile Include="src\gamepad.cpp" />
     <ClCompile Include="src\lobby_wheels.cpp" />
@@ -130,6 +131,7 @@
     <ClInclude Include="src\snow_sound.h" />
     <ClInclude Include="src\snow_tires_sound.h" />
     <ClInclude Include="src\dab.h" />
+    <ClInclude Include="src\gamelog.h" />
     <ClInclude Include="src\laptimer.h" />
     <ClInclude Include="src\gamepad.h" />
     <ClInclude Include="src\lobby_wheels.h" />

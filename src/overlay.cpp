@@ -40,6 +40,7 @@
 #include "gamepad.h"
 #include "hooks.h"
 #include "log.h"
+#include "gamelog.h"
 #include "laptimer.h"
 #include "logo_png.h"
 #include "mathlib.h"
@@ -5044,6 +5045,7 @@ void OverlayFrame(HDC dc)
     g_gameWindow = window;
     NoteMouseActivity();
     setups::Update(window, now);  // (a setup being loaded or saved: its command typed along)
+    gamelog::Poll(now);            // (the game's own log: a track reloaded, a rejoin - see gamelog.h)
     LapTimerUpdate(now);           // (timed with the menu open too)
     UpdateFullscreenWindow(window, cfg.fullscreenWindow);
     UpdateSoundPacks(now);

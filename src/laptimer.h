@@ -24,7 +24,7 @@ void NewTrack();
 // - pausing did nothing: an online race - it wasn't paused.)
 void PauseKey(double now);
 
-// What the game added to its own log (lastlog.txt; Update reads it as it grows): its "Resetting" - a
+// What the game added to its own log (lastlog.txt; gamelog.h reads it as it grows): its "Resetting" - a
 // rejoin, a new race, on the same track (it loads the bikes again, not the track: nothing drawn says
 // so) - starts the laps and bests over; its "Loading terrain" (another track) is NewTrack.
 void NoteGameLog(const std::string& text);

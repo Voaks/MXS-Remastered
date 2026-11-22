@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../src/laptimer.cpp"
+#include "../src/gamelog.cpp"
 
 namespace mxcam {
 void Log(const char* format, ...)
@@ -27,6 +28,10 @@ const wchar_t* GameFolder() { return g_folder.c_str(); }
 static std::wstring g_personal;
 const wchar_t* PersonalFolder() { return g_personal.c_str(); }
 }  // namespace paths
+namespace postfx {
+static int g_marksCleared = 0;  // (the tire marks told to start over: gamelog.cpp)
+void MarksNewTrack() { ++g_marksCleared; }
+}  // namespace postfx
 }  // namespace mxcam
 
 using namespace mxcam;
@@ -277,17 +282,21 @@ int main(int argc, char** argv)
             fclose(f);
         };
         Write("[1:46:32.14] Resetting\n[1:46:32.22] Loading terrain\n", false);
-        laptimer::g_testTracks = false;  // (the log is read only outside tests otherwise)
-        Ride(r, r.d + 300.0, 20.0);       // (the log looked at: what's in it already left alone)
+        gamelog::Poll(r.t);               // (the log looked at: what's in it already left alone)
+        Ride(r, r.d + 300.0, 20.0);
+        gamelog::Poll(r.t);
         const int lapBefore = g_last.lap;
-        Check(g_last.track && lapBefore >= 1, "the game's log as it was before isn't taken for a reset");
+        Check(g_last.track && lapBefore >= 1 && postfx::g_marksCleared == 0, "the game's log as it was before isn't taken for a reset");
         Write("[2:04:58.84] Resett", true);  // (half a line so far)
         Ride(r, r.d + 20.0, 20.0);
-        Check(g_last.lap == lapBefore, "half a line in the game's log: not yet");
+        gamelog::Poll(r.t);
+        Check(g_last.lap == lapBefore && postfx::g_marksCleared == 0, "half a line in the game's log: not yet");
         Write("ing\n[2:04:58.85] Loading bikes\n", true);
         Ride(r, r.d + 20.0, 20.0);
+        gamelog::Poll(r.t);
+        Ride(r, r.d + 1.0, 20.0);
         Check(g_last.track && g_last.lap == 0 && g_last.best < 0, "a Resetting added to the game's log: the laps start over");
-        laptimer::g_testTracks = true;
+        Check(postfx::g_marksCleared == 1, "and the tire marks start over (the same track reloaded kept its ruts)");
         paths::g_personal.clear();
     }
 
