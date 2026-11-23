@@ -5,6 +5,8 @@
     global:
         gl*;
         egl*;
+        XPending;
+        XEventsQueued;
         XNextEvent;
         XIfEvent;
         XCheckIfEvent;

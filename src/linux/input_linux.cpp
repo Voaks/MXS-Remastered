@@ -65,26 +65,14 @@ struct XButtonEvent {
     unsigned int  button;
     Bool          same_screen;
 };
-struct XPropertyEvent {
-    int           type;
-    unsigned long serial;
-    Bool          send_event;
-    Display*      display;
-    Window        window;
-    unsigned long atom;
-    unsigned long time;
-    int           state;
-};
-union XEvent {
+union XEvent {  // (Xlib's: 24 longs, whatever the event)
     int            type;
     XAnyEvent      xany;
     XKeyEvent      xkey;
     XButtonEvent   xbutton;
-    XPropertyEvent xproperty;
     long           pad[24];
 };
-constexpr int kKeyPress = 2, kKeyRelease = 3, kButtonPress = 4, kMotionNotify = 6,
-              kPropertyNotify = 28;
+constexpr int kKeyPress = 2, kKeyRelease = 3, kButtonPress = 4, kMotionNotify = 6;
 constexpr unsigned kButton1Mask = 1u << 8, kButton2Mask = 1u << 9, kButton3Mask = 1u << 10;
 
 using PredicateFn = Bool (*)(Display*, XEvent*, char*);
@@ -486,130 +474,233 @@ int ToUnicode(UINT vk, UINT, const BYTE* state, LPWSTR out, int size, UINT)
 }
 
 // ---- The game's input events ----------------------------------------------------------------
+// Each function below reads the event into a buffer of its own (XEvent local), never into the
+// game's: the event is noted (Note), and handed to the game - unchanged, as Xlib gave it - unless the
+// menu has the input and it's a press or a pointer move (Swallows), in which case it's left out and
+// the next one is read instead. The game's own buffer is only ever written with an event as Xlib
+// returned it. (As the Windows build keeps such input from the game: by not passing the message on.)
+// XPending and XEventsQueued take the left-out events off the front of the queue first, so a game
+// that reads events while XPending says there are some never waits in XNextEvent for one.
 namespace {
 bool g_keyHeld[256] = {};
 
-// An event on its way to the game: noted, and taken away from it while the menu has the input.
-void Filter(Display* display, XEvent* event)
+// An event on its way to the game: the keys and the wheel noted for the menu, the game's window found.
+void Note(Display* display, XEvent& event)
 {
-    if (!event)
-        return;
-    const int type = event->type;
+    const int type = event.type;
     if (type == kKeyPress || type == kKeyRelease) {
-        const unsigned code = event->xkey.keycode & 0xFF;
+        const unsigned code = event.xkey.keycode & 0xFF;
         const bool wasHeld = g_keyHeld[code];
         g_keyHeld[code] = type == kKeyPress;
         if (type == kKeyPress && g_x.LookupKeysym) {
-            const int vk = VkOfSym(g_x.LookupKeysym(&event->xkey, 0));
+            const int vk = VkOfSym(g_x.LookupKeysym(&event.xkey, 0));  // (our copy)
             if (vk)
                 mxcam::OverlayGameKeyDown(vk, wasHeld);
         }
-    } else if (type == kButtonPress && (event->xbutton.button == 4 || event->xbutton.button == 5)) {
+    } else if (type == kButtonPress && (event.xbutton.button == 4 || event.xbutton.button == 5)) {
         if (mxcam::OverlayTakesInput())
-            mxcam::OverlayWheel(event->xbutton.button == 4 ? 1 : -1);
+            mxcam::OverlayWheel(event.xbutton.button == 4 ? 1 : -1);
     }
-    if (event->xany.window && !g_gameWindow.load())
-        mxcam::platform::NoteGameWindow(display, event->xany.window);
-    if (mxcam::OverlayTakesInput() && (type == kKeyPress || type == kButtonPress || type == kMotionNotify)) {
-        // (A property change of no property: nothing the game acts on.)
-        const Window window = event->xany.window;
-        const unsigned long serial = event->xany.serial;
-        Display* from = event->xany.display;
-        memset(event, 0, sizeof *event);
-        event->xproperty.type = kPropertyNotify;
-        event->xproperty.serial = serial;
-        event->xproperty.display = from;
-        event->xproperty.window = window;
-        event->xproperty.atom = 0;
-        event->xproperty.state = 1;  // PropertyDelete
+    if (event.xany.window && !g_gameWindow.load())
+        mxcam::platform::NoteGameWindow(display, event.xany.window);
+}
+
+// Whether it's kept from the game: a press or a pointer move while the menu has the input. (Releases
+// always reach it, so nothing it saw go down sticks.)
+bool Swallows(const XEvent& event)
+{
+    const int type = event.type;
+    return mxcam::OverlayTakesInput() && (type == kKeyPress || type == kButtonPress || type == kMotionNotify);
+}
+
+// Noted, and whether it's kept from the game.
+bool Filter(Display* display, XEvent& event)
+{
+    Note(display, event);
+    return Swallows(event);
+}
+
+// The events at the front of Xlib's queue the game won't be given: read off it (into our buffer) and
+// noted, so the count the game is told is of events it will get.
+int (*RealNextEvent())(Display*, XEvent*)
+{
+    static auto real = Next<int (*)(Display*, XEvent*)>("XNextEvent");
+    return real;
+}
+void DropSwallowedFront(Display* display, int (*queued)(Display*, int), int mode)
+{
+    static auto peek = Next<int (*)(Display*, XEvent*)>("XPeekEvent");
+    const auto next = RealNextEvent();
+    if (!peek || !next || !mxcam::OverlayTakesInput())
+        return;
+    for (int guard = 0; guard < 4096 && queued(display, mode) > 0; ++guard) {
+        XEvent local;
+        peek(display, &local);
+        if (!Swallows(local))
+            return;
+        next(display, &local);
+        Note(display, local);
     }
 }
 }  // namespace
 
 #define MXCAM_EXPORT extern "C" __attribute__((visibility("default")))
 
+MXCAM_EXPORT int XEventsQueued(Display* display, int mode)
+{
+    static auto real = Next<int (*)(Display*, int)>("XEventsQueued");
+    LoadX();
+    if (!real)
+        return 0;
+    DropSwallowedFront(display, real, mode);
+    return real(display, mode);
+}
+
+MXCAM_EXPORT int XPending(Display* display)
+{
+    static auto real = Next<int (*)(Display*)>("XPending");
+    static auto queued = Next<int (*)(Display*, int)>("XEventsQueued");
+    LoadX();
+    if (!real)
+        return 0;
+    if (queued)
+        DropSwallowedFront(display, queued, 2 /* QueuedAfterFlush, as XPending */);
+    return real(display);
+}
+
+// The ones that wait for an event: until one the game is given.
 MXCAM_EXPORT int XNextEvent(Display* display, XEvent* event)
 {
-    static auto real = Next<int (*)(Display*, XEvent*)>("XNextEvent");
+    const auto real = RealNextEvent();
     LoadX();
-    const int r = real ? real(display, event) : 0;
-    Filter(display, event);
-    return r;
+    if (!real)
+        return 0;
+    for (;;) {
+        XEvent local;
+        const int r = real(display, &local);
+        if (!Filter(display, local)) {
+            *event = local;
+            return r;
+        }
+    }
 }
 
 MXCAM_EXPORT int XIfEvent(Display* display, XEvent* event, PredicateFn predicate, char* arg)
 {
     static auto real = Next<int (*)(Display*, XEvent*, PredicateFn, char*)>("XIfEvent");
     LoadX();
-    const int r = real ? real(display, event, predicate, arg) : 0;
-    Filter(display, event);
-    return r;
-}
-
-MXCAM_EXPORT Bool XCheckIfEvent(Display* display, XEvent* event, PredicateFn predicate, char* arg)
-{
-    static auto real = Next<Bool (*)(Display*, XEvent*, PredicateFn, char*)>("XCheckIfEvent");
-    LoadX();
-    const Bool r = real ? real(display, event, predicate, arg) : 0;
-    if (r)
-        Filter(display, event);
-    return r;
+    if (!real)
+        return 0;
+    for (;;) {
+        XEvent local;
+        const int r = real(display, &local, predicate, arg);
+        if (!Filter(display, local)) {
+            *event = local;
+            return r;
+        }
+    }
 }
 
 MXCAM_EXPORT int XWindowEvent(Display* display, Window window, long mask, XEvent* event)
 {
     static auto real = Next<int (*)(Display*, Window, long, XEvent*)>("XWindowEvent");
     LoadX();
-    const int r = real ? real(display, window, mask, event) : 0;
-    Filter(display, event);
-    return r;
-}
-
-MXCAM_EXPORT Bool XCheckWindowEvent(Display* display, Window window, long mask, XEvent* event)
-{
-    static auto real = Next<Bool (*)(Display*, Window, long, XEvent*)>("XCheckWindowEvent");
-    LoadX();
-    const Bool r = real ? real(display, window, mask, event) : 0;
-    if (r)
-        Filter(display, event);
-    return r;
+    if (!real)
+        return 0;
+    for (;;) {
+        XEvent local;
+        const int r = real(display, window, mask, &local);
+        if (!Filter(display, local)) {
+            *event = local;
+            return r;
+        }
+    }
 }
 
 MXCAM_EXPORT int XMaskEvent(Display* display, long mask, XEvent* event)
 {
     static auto real = Next<int (*)(Display*, long, XEvent*)>("XMaskEvent");
     LoadX();
-    const int r = real ? real(display, mask, event) : 0;
-    Filter(display, event);
-    return r;
+    if (!real)
+        return 0;
+    for (;;) {
+        XEvent local;
+        const int r = real(display, mask, &local);
+        if (!Filter(display, local)) {
+            *event = local;
+            return r;
+        }
+    }
+}
+
+// The ones that don't wait: the next matching one the game is given, or False (the game's buffer
+// untouched) once there are none.
+MXCAM_EXPORT Bool XCheckIfEvent(Display* display, XEvent* event, PredicateFn predicate, char* arg)
+{
+    static auto real = Next<Bool (*)(Display*, XEvent*, PredicateFn, char*)>("XCheckIfEvent");
+    LoadX();
+    XEvent local;
+    while (real && real(display, &local, predicate, arg)) {
+        if (!Filter(display, local)) {
+            *event = local;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+MXCAM_EXPORT Bool XCheckWindowEvent(Display* display, Window window, long mask, XEvent* event)
+{
+    static auto real = Next<Bool (*)(Display*, Window, long, XEvent*)>("XCheckWindowEvent");
+    LoadX();
+    XEvent local;
+    while (real && real(display, window, mask, &local)) {
+        if (!Filter(display, local)) {
+            *event = local;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 MXCAM_EXPORT Bool XCheckMaskEvent(Display* display, long mask, XEvent* event)
 {
     static auto real = Next<Bool (*)(Display*, long, XEvent*)>("XCheckMaskEvent");
     LoadX();
-    const Bool r = real ? real(display, mask, event) : 0;
-    if (r)
-        Filter(display, event);
-    return r;
+    XEvent local;
+    while (real && real(display, mask, &local)) {
+        if (!Filter(display, local)) {
+            *event = local;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 MXCAM_EXPORT Bool XCheckTypedEvent(Display* display, int type, XEvent* event)
 {
     static auto real = Next<Bool (*)(Display*, int, XEvent*)>("XCheckTypedEvent");
     LoadX();
-    const Bool r = real ? real(display, type, event) : 0;
-    if (r)
-        Filter(display, event);
-    return r;
+    XEvent local;
+    while (real && real(display, type, &local)) {
+        if (!Filter(display, local)) {
+            *event = local;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 MXCAM_EXPORT Bool XCheckTypedWindowEvent(Display* display, Window window, int type, XEvent* event)
 {
     static auto real = Next<Bool (*)(Display*, Window, int, XEvent*)>("XCheckTypedWindowEvent");
     LoadX();
-    const Bool r = real ? real(display, window, type, event) : 0;
-    if (r)
-        Filter(display, event);
-    return r;
+    XEvent local;
+    while (real && real(display, window, type, &local)) {
+        if (!Filter(display, local)) {
+            *event = local;
+            return 1;
+        }
+    }
+    return 0;
 }
