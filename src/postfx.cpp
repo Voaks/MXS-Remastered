@@ -1342,6 +1342,9 @@ struct SkeletonRecord {
     float    centre[kSkeletonBones * 3] = {};  // each bone's rest position (u_bone_c): which joint it is
 };
 std::vector<SkeletonRecord> g_skeletons;
+// (Where each of this frame's records is, by a hash of what makes it the same draw again - NoteSkeleton
+// looked through every record for each draw: at a gate, ~400 records and ~80,000 comparisons a frame.)
+std::unordered_multimap<unsigned long long, size_t> g_skeletonIndex;
 
 // Every rider out to kRiderPointRange (not just those near the camera, as above): where their hips
 // are and how their torso is turned, for a headlight on bikes that aren't found by their wheels (a
@@ -7576,6 +7579,10 @@ unsigned g_timerFrame = 0;
 double g_gpuMs[kTimerSlots] = {}, g_cpuMs[kTimerSlots] = {};
 std::chrono::steady_clock::time_point g_timerStart[kTimerSlots];
 double g_castNowMs = 0, g_castNowMsTraced = 0, g_lobbyMs = 0;
+double g_drawHooksMs = 0, g_drawHooksMsTraced = 0;
+int g_drawHooks = 0, g_drawHooksTraced = 0;
+long long g_flushIndices[4] = {};
+long long g_drawParts[7] = {}, g_drawPartsTraced[7] = {};
 // And how many depth samples the held-back casters wrote into the shadow map (GL_SAMPLES_PASSED,
 // read the same few frames later): none at all while things should be casting = drawn but thrown away.
 constexpr GLenum kSamplesPassed = 0x8914;
@@ -7769,6 +7776,28 @@ bool WantsShadowCasters()
            g_glState >= 0 && (!g_shadow.setup || g_shadow.usable);
 }
 
+// Whether a caster covering lo..hi in the sun's view (x, y) needs no cascade coarser than c. Its shadow
+// falls at the same place in the sun's view; there MapShadow looks it up in the finest cascade it's
+// inside, blended into the next one out over that one's outer 6% (CascadeShadow: inside reaches 1 at
+// 0.84 of the half from the middle). All of it (and the margin, for the filter's taps and the push off
+// a surface) within that much of cascade c's middle: every spot of its shadow is read from c or a
+// finer one, never a coarser one - those would draw it for nothing. (Near you - your bike, the bikes
+// beside you at the gate - everything went into all four, 16k indices a part.)
+// (Tests: MXCAM_TEST_ALL_CASCADES - into every cascade it overlaps again, to compare.)
+static constexpr double kRiderReachMetres = 2.5;  // a rider's pieces, from its first bone (and its arms and legs)
+static bool StopsAtCascade(int c, const double lo[2], const double hi[2], double margin)
+{
+    static const bool all = GetEnvironmentVariableA("MXCAM_TEST_ALL_CASCADES", nullptr, 0) > 0;
+    if (all)
+        return false;
+    // (Plus 6 of this cascade's texels: the soft filter's taps reach ~3, the push off a surface 1.5 -
+    // at a small map and a long distance a far cascade's texels are tens of centimetres.)
+    const double texel = 4.0 * g_shadow.cascadeHalf[c] / std::max(g_res.shadowSize, 1);
+    const double core = 0.84 * g_shadow.cascadeHalf[c] - margin - 6.0 * texel;
+    return core > 0 && lo[0] >= g_shadow.cascadeX[c] - core && hi[0] <= g_shadow.cascadeX[c] + core &&
+           lo[1] >= g_shadow.cascadeY[c] - core && hi[1] <= g_shadow.cascadeY[c] + core;
+}
+
 bool ShadowMatrices(const float uploaded[16], const float* anchorEye, float lightModelview[16], unsigned* cascades,
                     const float* boxLo, const float* boxHi)
 {
@@ -7789,14 +7818,19 @@ bool ShadowMatrices(const float uploaded[16], const float* anchorEye, float ligh
     // most of them meshes placed in world space - origin at the track's - drawn into all four.)
     static const bool noBox = GetEnvironmentVariableA("MXCAM_TEST_NO_BOXCULL", nullptr, 0) > 0;  // (tests: the old way, to compare)
     if (boxLo && boxHi && !anchorEye && !noBox) {
+        // (All eight corners at once: the middle in the sun's view, and how far the box reaches
+        // along each axis - the absolute matrix times its half-size. Every draw comes through here.)
         double lo[3] = {}, hi[3] = {};
-        for (int corner = 0; corner < 8; ++corner) {
-            const Vec3 p = TransformPoint(toLight, Vec3{ (corner & 1) ? boxHi[0] : boxLo[0], (corner & 2) ? boxHi[1] : boxLo[1],
-                                                         (corner & 4) ? boxHi[2] : boxLo[2] });
-            const double v[3] = { p.x, p.y, p.z };
+        {
+            const double mid[3] = { 0.5 * (static_cast<double>(boxLo[0]) + boxHi[0]), 0.5 * (static_cast<double>(boxLo[1]) + boxHi[1]),
+                                    0.5 * (static_cast<double>(boxLo[2]) + boxHi[2]) };
+            const double half[3] = { 0.5 * (static_cast<double>(boxHi[0]) - boxLo[0]), 0.5 * (static_cast<double>(boxHi[1]) - boxLo[1]),
+                                     0.5 * (static_cast<double>(boxHi[2]) - boxLo[2]) };
             for (int r = 0; r < 3; ++r) {
-                lo[r] = corner ? std::fmin(lo[r], v[r]) : v[r];
-                hi[r] = corner ? std::fmax(hi[r], v[r]) : v[r];
+                const double middle = toLight[r] * mid[0] + toLight[4 + r] * mid[1] + toLight[8 + r] * mid[2] + toLight[12 + r];
+                const double reach = std::fabs(toLight[r]) * half[0] + std::fabs(toLight[4 + r]) * half[1] + std::fabs(toLight[8 + r]) * half[2];
+                lo[r] = middle - reach;
+                hi[r] = middle + reach;
             }
         }
         if (lo[2] > g_shadow.depth || hi[2] < -g_shadow.depth)
@@ -7807,6 +7841,8 @@ bool ShadowMatrices(const float uploaded[16], const float* anchorEye, float ligh
             if (hi[0] >= g_shadow.cascadeX[c] - h && lo[0] <= g_shadow.cascadeX[c] + h && hi[1] >= g_shadow.cascadeY[c] - h &&
                 lo[1] <= g_shadow.cascadeY[c] + h)
                 *cascades |= 1u << c;
+            if (StopsAtCascade(c, lo, hi, margin))
+                break;
         }
         ++g_castBoxed[*cascades ? 1 : 0];
         if (!*cascades)
@@ -7837,10 +7873,16 @@ bool ShadowMatrices(const float uploaded[16], const float* anchorEye, float ligh
     // Into each cascade it can reach: half as far again past its edge, and never less than 40 m past
     // it (a big object's origin can sit well off what it covers: left out of the sharp ones, the
     // stands' and banners' shadows came and went near you).
+    // (A rider, by its first bone: all of it within kRiderReach of that in the sun's view - the
+    // coarser cascades past one that holds all of that are left out, as for a measured box.)
+    const double riderReach = kRiderReachMetres * UnitsPerMetre();
+    const double riderLo[2] = { at.x - riderReach, at.y - riderReach }, riderHi[2] = { at.x + riderReach, at.y + riderReach };
     for (int c = 0; c < kCascades; ++c) {
         const double reach = g_shadow.cascadeHalf[c] + std::fmax(g_shadow.cascadeHalf[c] * 0.5, 40.0 * UnitsPerMetre());
         if (std::fabs(at.x - g_shadow.cascadeX[c]) <= reach && std::fabs(at.y - g_shadow.cascadeY[c]) <= reach)
             *cascades |= 1u << c;
+        if (anchorEye && StopsAtCascade(c, riderLo, riderHi, 1.0 * UnitsPerMetre()))
+            break;
     }
     if (!*cascades)
         return false;
@@ -8401,10 +8443,34 @@ void NoteSkeleton(unsigned program, const float* centres, const float* positions
             return;
     }
     // The same draw again (a rider takes several): skip it.
-    for (const SkeletonRecord& rec : g_skeletons)
-        if (rec.program == program && rec.bones == bones && std::memcmp(rec.viewModel, modelview, sizeof rec.viewModel) == 0 &&
-            std::memcmp(rec.position, positions, sizeof(float) * 3 * bones) == 0)
-            return;
+    unsigned long long key = 1469598103934665603ull ^ (static_cast<unsigned long long>(program) << 8) ^ static_cast<unsigned>(bones);
+    {
+        const auto MixWords = [&key](const float* data, int count) {  // (the floats' bits, a word at a time)
+            for (int i = 0; i < count; ++i) {
+                unsigned word;
+                std::memcpy(&word, data + i, sizeof word);
+                key = (key ^ word) * 0x9E3779B97F4A7C15ull;
+                key ^= key >> 29;
+            }
+        };
+        MixWords(modelview, 16);
+        MixWords(positions, 3 * bones);
+    }
+    static const bool scan = GetEnvironmentVariableA("MXCAM_TEST_NO_DRAW_CACHE", nullptr, 0) > 0;  // (tests: every record looked at, as before)
+    if (scan) {
+        for (const SkeletonRecord& rec : g_skeletons)
+            if (rec.program == program && rec.bones == bones && std::memcmp(rec.viewModel, modelview, sizeof rec.viewModel) == 0 &&
+                std::memcmp(rec.position, positions, sizeof(float) * 3 * bones) == 0)
+                return;
+    } else {
+        const auto range = g_skeletonIndex.equal_range(key);
+        for (auto it = range.first; it != range.second; ++it) {
+            const SkeletonRecord& rec = g_skeletons[it->second];
+            if (rec.program == program && rec.bones == bones && std::memcmp(rec.viewModel, modelview, sizeof rec.viewModel) == 0 &&
+                std::memcmp(rec.position, positions, sizeof(float) * 3 * bones) == 0)
+                return;
+        }
+    }
     SkeletonRecord rec;
     rec.program = program;
     rec.bones = bones;
@@ -8432,6 +8498,7 @@ void NoteSkeleton(unsigned program, const float* centres, const float* positions
             if (std::fabs(centres[b * 3]) <= 0.05 * halfSpan && (rec.hips < 0 || centres[b * 3 + 1] < centres[rec.hips * 3 + 1]))
                 rec.hips = b;
     }
+    g_skeletonIndex.emplace(key, g_skeletons.size());
     g_skeletons.push_back(rec);
 }
 
@@ -8527,7 +8594,19 @@ const char* WheelTraceText()
     n = static_cast<int>(strlen(text));
     snprintf(text + n, sizeof text - n, ",%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d/%d", g_gpuMs[0], g_gpuMs[1], g_cpuMs[0], g_cpuMs[1],
              g_castNowMsTraced, g_lobbyMs, g_castBoxed[0], g_castBoxed[1]);
+    n = static_cast<int>(strlen(text));
+    snprintf(text + n, sizeof text - n, ",%.2f,%d,%lld/%lld/%lld/%lld", g_drawHooksMsTraced, g_drawHooksTraced,
+             g_flushIndices[0] / 1000, g_flushIndices[1] / 1000, g_flushIndices[2] / 1000, g_flushIndices[3] / 1000);
     g_castBoxed[0] = g_castBoxed[1] = 0;
+    for (long long& k : g_flushIndices)
+        k = 0;
+    {
+        static const double msPerTick = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return 8.0 * 1000.0 / double(f.QuadPart); }();
+        n = static_cast<int>(strlen(text));
+        snprintf(text + n, sizeof text - n, ",%.2f/%.2f/%.2f/%.2f/%.2f/%.2f/%.2f", g_drawPartsTraced[0] * msPerTick,
+                 g_drawPartsTraced[1] * msPerTick, g_drawPartsTraced[2] * msPerTick, g_drawPartsTraced[3] * msPerTick,
+                 g_drawPartsTraced[4] * msPerTick, g_drawPartsTraced[5] * msPerTick, g_drawPartsTraced[6] * msPerTick);
+    }
     for (auto& kind : g_replays)
         for (int& c : kind)
             c = 0;
@@ -8747,6 +8826,17 @@ bool NearAnyRiderEye(const float eye[3], double metres)
 
 bool CameraAtYourHead() { return g_cameraAtHead; }
 void NoteCastNowMs(double ms) { g_castNowMs += ms; }
+void NoteDrawHooks(double ms) { g_drawHooksMs += ms; ++g_drawHooks; }
+void NoteDrawPart(int part, long long ticks)
+{
+    if (part >= 0 && part < 7)
+        g_drawParts[part] += ticks;
+}
+void NoteFlushIndices(int cascade, long long indices)
+{
+    if (cascade >= 0 && cascade < 4)
+        g_flushIndices[cascade] += indices;
+}
 void NoteLobbyMs(double ms) { g_lobbyMs = ms; }
 void RequestMarksDump() { g_markDumpWanted = true; g_aoDumpWanted = true; }
 
@@ -8825,6 +8915,14 @@ void FrameEnd(bool apply)
     ++g_timerFrame;
     g_castNowMsTraced = g_castNowMs;
     g_castNowMs = 0;
+    g_drawHooksMsTraced = g_drawHooksMs;
+    g_drawHooksTraced = g_drawHooks;
+    g_drawHooksMs = 0;
+    g_drawHooks = 0;
+    for (int k = 0; k < 7; ++k) {
+        g_drawPartsTraced[k] = g_drawParts[k];
+        g_drawParts[k] = 0;
+    }
     // The dab indicator's rider, when the effects didn't look for it this frame (shaders off).
     if ((cfg.dabIndicator || cfg.brakeSqueal > 0.0 || cfg.controllerLook) && g_frame.haveView && !g_riderThisFrame &&
         LoadGL()) {
@@ -8855,6 +8953,7 @@ void FrameEnd(bool apply)
     }
     g_frame = Frame{};
     g_skeletons.clear();
+    g_skeletonIndex.clear();
     g_riderPoints.clear();
     g_objects.clear();
     g_shadow = ShadowFrame{};

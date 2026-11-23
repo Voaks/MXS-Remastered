@@ -350,6 +350,14 @@ void PollHotkeys()
     static int polledFrames = 0;
     if (testReloadFrame >= 0 && polledFrames++ == testReloadFrame)
         ReloadConfig();
+    // (And a trace started on a given frame, as F11 would: MXCAM_TEST_TRACE_FRAME.)
+    static const int testTraceFrame = [] {
+        char text[16] = "";
+        return GetEnvironmentVariableA("MXCAM_TEST_TRACE_FRAME", text, sizeof text) > 0 ? atoi(text) : -1;
+    }();
+    static int tracePolled = 0;
+    if (testTraceFrame >= 0 && tracePolled++ == testTraceFrame)
+        StartTrace(0.2);
     if (!GameHasFocus() || OverlayListeningForKey())  // a keybind is being picked: that press is its answer
         return;
 

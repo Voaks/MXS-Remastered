@@ -257,6 +257,11 @@ bool CameraAtYourHead();
 // For the trace (F11): CPU time spent casting draws into the shadow map as the game draws them
 // (added up over the frame), and in watching every bike's wheels (lobby_wheels FrameEnd).
 void NoteCastNowMs(double ms);
+// (For the trace: the time in the mod's own work around each of the game's 3D draws, and how many;
+// the indices the held-back shadow casters drew into each cascade.)
+void NoteDrawHooks(double ms);
+void NoteFlushIndices(int cascade, long long indices);
+void NoteDrawPart(int part, long long ticks);  // (a sampled draw's part: 0 snapshots .. 6 wet; QueryPerformanceCounter ticks)
 void NoteLobbyMs(double ms);
 
 // For bug reports (F11): the tire marks map around you, saved as MXS_REMASTERED_marks.bmp next to

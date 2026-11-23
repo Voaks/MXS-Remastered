@@ -586,7 +586,23 @@ int main(int argc, char** argv)
     const GLint rRotations = rider ? gl.GetUniformLocation(rider, "u_bone_r") : -1;
     const GLint rSolid = rider ? gl.GetUniformLocation(rider, "u_solid") : -1;
     // Your bike's wheels (and the brake disc): drawn by the game's bike shader, which carries the tire dirt.
-    const GLuint bike = Build(kBikeVertex, kBikeFragment, "vattr_position");
+    // (MXCAM_TEST_BIKE_FS=<file>: the bike's fragment shader from a file instead - the game's own, as
+    // dumped - to see the mod's changes to it compile.)
+    std::string bikeFragment = kBikeFragment;
+    if (const char* file = getenv("MXCAM_TEST_BIKE_FS")) {
+        FILE* in = nullptr;
+        if (fopen_s(&in, file, "rb") == 0 && in) {
+            std::string text;
+            char buffer[4096];
+            size_t got;
+            while ((got = fread(buffer, 1, sizeof buffer, in)) > 0)
+                text.append(buffer, got);
+            fclose(in);
+            bikeFragment = text;
+            printf("    the bike's fragment shader from %s (%zu bytes)\n", file, text.size());
+        }
+    }
+    const GLuint bike = Build(kBikeVertex, bikeFragment.c_str(), "vattr_position");
     Check(bike != 0, "the bike shader (with the tire dirt the mod puts in it) compiles and links");
     const GLint bMv = bike ? gl.GetUniformLocation(bike, "u_modelview") : -1;
     const GLint bProj = bike ? gl.GetUniformLocation(bike, "u_projection") : -1;

@@ -221,6 +221,7 @@ struct SkinnedProgram {
     GLfloat hiddenRotation[kMaxBones * 9] = {};
 };
 std::unordered_map<GLuint, SkinnedProgram> g_skinned;
+std::atomic<unsigned> g_skinnedVersion{ 0 };  // bumped whenever g_skinned may have gained a program (FindSkinned's cache)
 
 // ---- What the shadow casters' batch needs to know without asking the driver -----------------
 constexpr GLenum kArrayBufferTarget = 0x8892;
@@ -575,6 +576,7 @@ void NoteUniformLocation(GLuint program, const GLchar* name, GLint location)
         g_envUniforms.insert(key);
     if (strcmp(name, kBoneUniform) == 0)
         g_boneUniforms.insert(key);
+    g_skinnedVersion.fetch_add(1);  // (a program may be added to g_skinned below: FindSkinned asks again)
     if (strcmp(name, kBoneCentreUniform) == 0)
         g_skinned[program].centreLoc = location;
     if (strcmp(name, kBoneUniform) == 0)
@@ -1322,10 +1324,23 @@ bool LeaveOutGameOverlay(const DrawCall& draw)
 // ---- Your own torso and head (see SkinnedProgram) -----------------------------------------
 SkinnedProgram* FindSkinned(GLuint program)
 {
+    // (Asked ~10 times for every draw the game makes - with the lock, ~0.5 ms a frame on a busy track.
+    // The last answer kept per thread: programs are only ever added to g_skinned, never removed, and
+    // an entry stays where it is, so it holds until another program is asked about or one is added.)
+    thread_local GLuint lastProgram = 0;
+    thread_local SkinnedProgram* lastSkin = nullptr;
+    thread_local unsigned lastVersion = ~0u;
+    static const bool noCache = GetEnvironmentVariableA("MXCAM_TEST_NO_DRAW_CACHE", nullptr, 0) > 0;  // (tests: as before)
+    const unsigned version = g_skinnedVersion.load(std::memory_order_acquire);
+    if (program == lastProgram && version == lastVersion && !noCache)
+        return lastSkin;
     AcquireSRWLockShared(&g_lock);
     const auto found = g_skinned.find(program);
     SkinnedProgram* skin = found != g_skinned.end() ? &found->second : nullptr;
     ReleaseSRWLockShared(&g_lock);
+    lastProgram = program;
+    lastSkin = skin;
+    lastVersion = version;
     return skin;
 }
 
@@ -2390,6 +2405,7 @@ constexpr char kWetFragmentApply[] =
     "\t}\n";
 bool g_loggedMudShader[2] = { false, false };
 bool g_loggedWetShader = false;
+bool g_loggedShadowShortcut = false;
 
 // Whether the changed source compiles (on a shader of our own; the game's is untouched until then).
 bool CompilesAs(GLenum type, const std::string& source)
@@ -2436,6 +2452,45 @@ std::string MudShader(GLuint shader, const std::string& source)
     } else {
         changed.insert(changed.find("out vec4 f_fragcolor;") + strlen("out vec4 f_fragcolor;") + 1, kMudFragmentDecl);
         changed.insert(changed.find("\tz = gl_FragCoord.z / gl_FragCoord.w;"), std::string(kArmFragmentApply) + kBodyFragmentApply + kMudFragmentApply);
+        // Drawn into the shadow map (u_mx_shadow: 1 only while the mod draws it there, ShadowPassFlag -
+        // not gl_FragCoord.w == 1, the sun's projection's, which a sliver of the view a foot from the
+        // camera has too: your bars, your arms), only its depth and its cut-out count: the game's own test, then nothing more. The rest - the
+        // normal map, the lighting, the mud, the wet shine - ran for every texel of the shadow map that
+        // every bike, rider and piece of scenery drawn with this shader covered: up to ~3-4 ms of the
+        // GPU's frame at a gate, for nothing (the shadow map has no colour). The cut-out the same: the
+        // game's color.a is u_ambient.a times the texture's alpha by then.
+        // (Tests: MXCAM_TEST_FULL_SHADOW_SHADER - the whole shader in the shadow map again, to compare.)
+        static const bool fullShadow = GetEnvironmentVariableA("MXCAM_TEST_FULL_SHADOW_SHADER", nullptr, 0) > 0;
+        const size_t lightAt = changed.find("\tlight = u_light_position;");
+        if (!fullShadow && lightAt != std::string::npos) {
+            // (Its lines end either way, \n or \r\n: the alpha test is "if (color.a < 0.75)", then only
+            // spaces and line ends, then "discard;".)
+            bool alphaTest = false;
+            const size_t test = source.find("if (color.a < 0.75)");
+            if (test != std::string::npos) {
+                const size_t next = source.find_first_not_of(" \t\r\n", test + strlen("if (color.a < 0.75)"));
+                alphaTest = next != std::string::npos && source.compare(next, strlen("discard;"), "discard;") == 0;
+            }
+            const bool cutOut = source.find("\tcolor = u_ambient;") != std::string::npos &&
+                                source.find("\tcolor *= texture(u_tex, interp_texcoord);") != std::string::npos && alphaTest &&
+                                source.find("discard", source.find("discard") + 1) == std::string::npos;  // (that one alone)
+            const bool plain = source.find("discard") == std::string::npos;
+            if (cutOut || plain) {
+                changed.insert(lightAt, cutOut ? "\tif (u_mx_shadow > 0.5) {\n"
+                                                 "\t\tif (u_ambient.a * texture(u_tex, interp_texcoord).a < 0.75)\n"
+                                                 "\t\t\tdiscard;\n"
+                                                 "\t\treturn;\n"
+                                                 "\t}\n"
+                                               : "\tif (u_mx_shadow > 0.5)\n\t\treturn;\n");
+                changed.insert(changed.find("out vec4 f_fragcolor;") + strlen("out vec4 f_fragcolor;") + 1,
+                               "uniform float u_mx_shadow;\n");  // (1 only while the mod draws it into the shadow map)
+                if (!g_loggedShadowShortcut) {
+                    g_loggedShadowShortcut = true;
+                    Log("postfx: shadow map: the bike shader stops after its cut-out test in the shadow map (%s)",
+                        cutOut ? "the game's alpha test kept" : "no alpha test in it");
+                }
+            }
+        }
     }
     using PFN_GetShaderiv = void(APIENTRY*)(GLuint, GLenum, GLint*);
     static const auto get = reinterpret_cast<PFN_GetShaderiv>(GetRealGLFunction("glGetShaderiv"));
@@ -2771,10 +2826,12 @@ void* WrapProc(const char* name, void* real)
     return match->wrapper;
 }
 
+bool g_logHeavyCasters = false;  // (F11: the heaviest held-back shadow casters of the next frame, logged)
 void StartTrace(double seconds)
 {
     if (g_trace)
         return;
+    g_logHeavyCasters = true;
     wchar_t path[1024];
     swprintf_s(path, L"%sMXS_REMASTERED_trace.csv", LogDirectory());
     postfx::RequestMarksDump();  // (and a picture of the tire marks map around you)
@@ -2799,7 +2856,7 @@ void StartTrace(double seconds)
                      "sh_replay_skinned_drawn/indices_changed/repointed/no_bones,sh_replay_rigid_drawn/indices_changed/repointed/no_bones,"
                      "sh_real_body_along,marks_repressed,marks_repress_waiting,marks_others_cached,marks_ms,marks_window_still,"
                      "gpu_shadow_flush_ms,gpu_effects_ms,cpu_shadow_flush_ms,cpu_effects_ms,cpu_cast_now_ms,cpu_wheel_watch_ms,"
-                     "sh_boxed_out/in,whip,game_step_ms,bike_rest,camera_rest,lean_along,lean_pitch_deg,lean_shift\n");
+                     "sh_boxed_out/in,cpu_draw_hooks_ms,draws_hooked,sh_flush_kindices_c0/c1/c2/c3,draw_parts_ms_snapshots/checks/bones/wheels/shadow/dirt/wet,whip,game_step_ms,bike_rest,camera_rest,lean_along,lean_pitch_deg,lean_shift\n");
     // Times are relative to the key press: the history before it is negative.
     const double now = camera::ContentTime();
     g_traceFrames = 0;
@@ -2899,7 +2956,27 @@ bool StaticDraw(const DrawCall& draw)
 }
 
 // Its geometry in buffers nothing rewrites while running, so the same draw call draws it later.
+// (Asked 4-5 times for each draw the game makes: the answer kept for the draw it was asked about -
+// g_drawSerial, counted by NoteDraw - as nothing it looks at changes during one.)
+unsigned long long g_drawSerial = 0;
+bool StaticBuffersNow(const DrawCall& draw);
 bool StaticBuffers(const DrawCall& draw)
+{
+    static unsigned long long serial = ~0ull;
+    static GLuint vao = 0;
+    static DrawCall asked;
+    static bool answer = false;
+    static const bool noCache = GetEnvironmentVariableA("MXCAM_TEST_NO_DRAW_CACHE", nullptr, 0) > 0;  // (tests: as before)
+    if (!noCache && serial == g_drawSerial && vao == g_vao && asked.kind == draw.kind && asked.count == draw.count &&
+        asked.first == draw.first && asked.indices == draw.indices && asked.mode == draw.mode)
+        return answer;
+    answer = StaticBuffersNow(draw);
+    serial = g_drawSerial;
+    vao = g_vao;
+    asked = draw;
+    return answer;
+}
+bool StaticBuffersNow(const DrawCall& draw)
 {
     if (g_vao == 0 || g_activeUnit < 0 || g_activeUnit >= 16)
         return false;
@@ -2960,6 +3037,21 @@ bool CanHoldBack(const DrawCall& draw, const GLfloat uploaded[16])
 }
 
 DeferredCaster MakeCaster(const DrawCall& draw, GLint modelviewLoc, GLint projectionLoc);
+
+// The bike shader's u_mx_shadow (MudShader): 1 while the mod draws with the program into the shadow
+// map - only its cut-out test runs then - and 0 again before the game draws with it. The program
+// must be the current one. (Its location asked once per program: asking GL waits for the driver.)
+std::unordered_map<GLuint, GLint> g_shadowFlagAt;
+void ShadowPassFlag(GLuint program, bool on)
+{
+    if (!program || !real_glUniform1f)
+        return;
+    auto found = g_shadowFlagAt.find(program);
+    if (found == g_shadowFlagAt.end())
+        found = g_shadowFlagAt.emplace(program, real_glGetUniformLocation ? real_glGetUniformLocation(program, "u_mx_shadow") : -1).first;
+    if (found->second >= 0)
+        real_glUniform1f(found->second, on ? 1.0f : 0.0f);
+}
 
 // Your rider's pieces the game leaves out, held back along with one of yours it draws (see
 // DrawRealBodyAlong, defined below). Returns how many.
@@ -3241,7 +3333,28 @@ const DrawBounds* g_castBox = nullptr;  // the draw TooBigToCast just measured (
 // The current draw's bounds (DrawBounds), measured once per draw call and kept while its buffers'
 // contents are the same. Null for geometry the game rewrites while running (dust, streamed pieces):
 // reading it back every time it changes stalls the frame.
+DrawBounds* CachedBoundsNow(const DrawCall& draw);
 DrawBounds* CachedBounds(const DrawCall& draw)
+{
+    // (Asked again for the same draw by the dirt and the wheels after the shadow: the answer kept for
+    // the draw it was asked about, as StaticBuffers does.)
+    static unsigned long long serial = ~0ull;
+    static GLuint vao = 0, program = 0;
+    static DrawCall asked;
+    static DrawBounds* answer = nullptr;
+    static const bool noCache = GetEnvironmentVariableA("MXCAM_TEST_NO_DRAW_CACHE", nullptr, 0) > 0;  // (tests: as before)
+    if (!noCache && serial == g_drawSerial && vao == g_vao && program == g_program && asked.kind == draw.kind &&
+        asked.count == draw.count && asked.first == draw.first && asked.indices == draw.indices && asked.mode == draw.mode &&
+        asked.type == draw.type)
+        return answer;
+    answer = CachedBoundsNow(draw);
+    serial = g_drawSerial;
+    vao = g_vao;
+    program = g_program;
+    asked = draw;
+    return answer;
+}
+DrawBounds* CachedBoundsNow(const DrawCall& draw)
 {
     const auto element = g_elementBuffers.find(g_vao);
     if (element != g_elementBuffers.end() && element->second && Streamed(element->second))
@@ -3300,21 +3413,24 @@ bool TooBigToCast(const DrawCall& draw, const GLfloat uploaded[16])
         return false;
     const double upEye[3] = { view[0] * up[0] + view[4] * up[1] + view[8] * up[2], view[1] * up[0] + view[5] * up[1] + view[9] * up[2],
                               view[2] * up[0] + view[6] * up[1] + view[10] * up[2] };
-    double lo[3] = {}, hi[3] = {}, lowest = 0;
-    for (int corner = 0; corner < 8; ++corner) {
-        const float p[3] = { (corner & 1) ? b.hi[0] : b.lo[0], (corner & 2) ? b.hi[1] : b.lo[1], (corner & 4) ? b.hi[2] : b.lo[2] };
-        double e[3];
-        for (int r = 0; r < 3; ++r)
-            e[r] = uploaded[r] * p[0] + uploaded[4 + r] * p[1] + uploaded[8 + r] * p[2] + uploaded[12 + r];
-        const double height = e[0] * upEye[0] + e[1] * upEye[1] + e[2] * upEye[2];  // above the camera
-        for (int r = 0; r < 3; ++r) {
-            lo[r] = corner ? std::fmin(lo[r], e[r]) : e[r];
-            hi[r] = corner ? std::fmax(hi[r], e[r]) : e[r];
-        }
-        lowest = corner ? std::fmin(lowest, height) : height;
+    // (The box's corners in eye space, all eight at once: its middle there, and how far it reaches
+    // along each axis - the absolute matrix times its half-size. The same as turning each corner and
+    // taking the least and most, for less: this runs for every draw the game makes.)
+    double mid[3], half[3], reach[3], middle[3];
+    for (int k = 0; k < 3; ++k) {
+        mid[k] = 0.5 * (static_cast<double>(b.lo[k]) + b.hi[k]);
+        half[k] = 0.5 * (static_cast<double>(b.hi[k]) - b.lo[k]);
     }
+    for (int r = 0; r < 3; ++r) {
+        middle[r] = uploaded[r] * mid[0] + uploaded[4 + r] * mid[1] + uploaded[8 + r] * mid[2] + uploaded[12 + r];
+        reach[r] = std::fabs(uploaded[r]) * half[0] + std::fabs(uploaded[4 + r]) * half[1] + std::fabs(uploaded[8 + r]) * half[2];
+    }
+    // Its lowest point above the camera: the middle's height, less how far the box reaches down.
+    double lowest = middle[0] * upEye[0] + middle[1] * upEye[1] + middle[2] * upEye[2];
+    for (int k = 0; k < 3; ++k)
+        lowest -= std::fabs(uploaded[4 * k] * upEye[0] + uploaded[4 * k + 1] * upEye[1] + uploaded[4 * k + 2] * upEye[2]) * half[k];
     const double u = 3.2808;  // (game units: feet)
-    const double across = std::sqrt((hi[0] - lo[0]) * (hi[0] - lo[0]) + (hi[1] - lo[1]) * (hi[1] - lo[1]) + (hi[2] - lo[2]) * (hi[2] - lo[2]));
+    const double across = 2.0 * std::sqrt(reach[0] * reach[0] + reach[1] * reach[1] + reach[2] * reach[2]);
     const bool tooBig = across > 80.0 * u;
     // All of it well above the camera: a stadium's upper stands, its lights and roof panels - but
     // only where the track is a stadium (something far too big has been seen). Elsewhere it's a
@@ -3580,6 +3696,7 @@ void CastShadow(const DrawCall& draw)
     if (nearYou)
         postfx::NoteNearCast(CanHoldBack(draw, mv->second.uploaded) ? 5 : 1);  // (5: held back to be repeated later)
 
+
     // Static scenery and every bike's parts (not skinned, its geometry in buffers nothing rewrites
     // while running): held back and drawn with the others in one go before the shadows are applied
     // (FlushShadowCasters).
@@ -3610,6 +3727,7 @@ void CastShadow(const DrawCall& draw)
     if (!postfx::BeginShadowDraw())
         return;
     ++g_castAtOnce;
+    ShadowPassFlag(g_program, true);
     // Your torso and head hidden on screen (Config::hideOwnBody) still cast their shadow: the
     // game's own bones for the shadow, ours again after.
     SkinnedProgram* hiddenBody = FindSkinned(g_program);
@@ -3678,6 +3796,7 @@ void CastShadow(const DrawCall& draw)
         UploadSkinnedRotations(hiddenBody->rotationLoc, hiddenBody->rotations, hiddenBody->transposed,
                                hiddenBody->hiddenRotation, hiddenBody->rotationArb);
     }
+    ShadowPassFlag(g_program, false);
     postfx::EndShadowDraw();
 }
 
@@ -6049,6 +6168,18 @@ void FlushShadowCasters()
     };
     GLfloat attribNow[kConstAttribs][4];  // the constant attributes as they stand (the game's, then ours)
     std::copy(&g_constAttrib[0][0], &g_constAttrib[0][0] + kConstAttribs * 4, &attribNow[0][0]);
+    // (Per program: the uniform snapshot last put in place, and the cascade whose projection it holds -
+    // the same again is nothing to upload: most casters in a row share both.)
+    struct ProgramNow { GLuint program; int snapshot; int cascade; GLint projectionLoc; };
+    std::vector<ProgramNow> programNow;
+    const auto NowOf = [&programNow](GLuint p) -> ProgramNow& {
+        for (ProgramNow& n : programNow)
+            if (n.program == p)
+                return n;
+        programNow.push_back(ProgramNow{ p, -1, -1, -1 });
+        return programNow.back();
+    };
+    static const bool everyUpload = GetEnvironmentVariableA("MXCAM_TEST_EVERY_UPLOAD", nullptr, 0) > 0;  // (tests: as before)
     // Cascade by cascade (each a tile of the shadow map), each caster into those it reaches.
     for (int cascade = 0; cascade < postfx::ShadowCascades(); ++cascade) {
     float cascadeProjection[16];
@@ -6068,8 +6199,10 @@ void FlushShadowCasters()
         if (c.program != program) {
             real_glUseProgram(c.program);
             program = c.program;
-            if (std::find(touched.begin(), touched.end(), program) == touched.end())
+            if (std::find(touched.begin(), touched.end(), program) == touched.end()) {
                 touched.push_back(program);
+                ShadowPassFlag(program, true);  // (the bike shader: its cut-out test only, in the shadow map)
+            }
         }
         if (c.vao != vao) {
             real_glBindVertexArray(c.vao);
@@ -6082,8 +6215,10 @@ void FlushShadowCasters()
                 bound[u] = c.textures[u];
             }
         }
+        ProgramNow& state = NowOf(c.program);
         if (c.uniforms >= 0 && c.uniforms < static_cast<int>(g_uniformSnaps.size()) &&
-            g_uniformSnaps[static_cast<size_t>(c.uniforms)].program == c.program) {
+            g_uniformSnaps[static_cast<size_t>(c.uniforms)].program == c.program && (everyUpload || state.snapshot != c.uniforms)) {
+            state.snapshot = c.uniforms;
             auto at = uniformsNow.find(c.program);
             if (at == uniformsNow.end())
                 at = uniformsNow.emplace(c.program, g_programUniforms[c.program].now).first;
@@ -6110,7 +6245,11 @@ void FlushShadowCasters()
             }
         }
         upload(c.modelviewLoc, 1, GL_FALSE, c.lightModelview);
-        upload(c.projectionLoc, 1, GL_FALSE, cascadeProjection);
+        if (everyUpload || state.cascade != cascade || state.projectionLoc != c.projectionLoc) {
+            upload(c.projectionLoc, 1, GL_FALSE, cascadeProjection);
+            state.cascade = cascade;
+            state.projectionLoc = c.projectionLoc;
+        }
         const SkinnedProgram* skin = c.bones >= 0 ? FindSkinned(c.program) : nullptr;
         if (skin && static_cast<size_t>(c.bones) < g_casterBones.size()) {
             const CasterBones& b = g_casterBones[static_cast<size_t>(c.bones)];
@@ -6161,8 +6300,36 @@ void FlushShadowCasters()
             }
         }
         Replay(c.draw);
+        postfx::NoteFlushIndices(cascade, c.draw.count);
     }
     }  // (each cascade)
+    if (g_logHeavyCasters) {
+        // (For the F11 trace: which held-back casters cost the shadow map the most - their indices times
+        // the cascades they go into - and where: how far off in the sun's view, in metres.)
+        g_logHeavyCasters = false;
+        std::vector<std::pair<long long, size_t>> heavy;
+        long long total = 0;
+        for (size_t i = 0; i < g_deferredCasters.size(); ++i) {
+            const DeferredCaster& c = g_deferredCasters[i];
+            int n = 0;
+            for (unsigned m = c.cascades; m; m &= m - 1)
+                ++n;
+            const long long w = static_cast<long long>(c.draw.count) * n;
+            total += w;
+            heavy.emplace_back(w, i);
+        }
+        std::sort(heavy.begin(), heavy.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        Log("trace: shadow map this frame: %zu held-back casters, %lld indices drawn in all (cascades counted)", g_deferredCasters.size(),
+            total);
+        for (size_t k = 0; k < heavy.size() && k < 10; ++k) {
+            const DeferredCaster& c = g_deferredCasters[heavy[k].second];
+            const float* t = c.lightModelview;
+            Log("trace:   %lld indices (%d each, cascades %s%s%s%s) program %u, vertex array %u, %s, its origin %.0f m from you in the sun's view (a mesh placed in world space: the track's origin)",
+                heavy[k].first, c.draw.count, c.cascades & 1 ? "0" : "", c.cascades & 2 ? "1" : "", c.cascades & 4 ? "2" : "",
+                c.cascades & 8 ? "3" : "", c.program, c.vao, c.bones >= 0 ? "a rider (skinned)" : "rigid",
+                std::sqrt(t[12] * t[12] + t[13] * t[13]) / 3.2808);
+        }
+    }
     // The constant attributes as the game left them.
     if (real_glVertexAttrib4f) {
         for (int k = 0; k < kConstAttribs; ++k) {
@@ -6176,6 +6343,7 @@ void FlushShadowCasters()
     // Back as the game left it: each program's own matrices, its program, arrays and textures.
     for (GLuint p : touched) {
         real_glUseProgram(p);
+        ShadowPassFlag(p, false);
         // Its other uniforms as the game left them (those a caster's own changed).
         if (const auto at = uniformsNow.find(p); at != uniformsNow.end()) {
             const ProgramUniforms& game = g_programUniforms[p];
@@ -6473,8 +6641,36 @@ void FlushSeeThroughDepth()
     g_seeThroughDraws.clear();
 }
 
+bool NoteDrawInner(const DrawCall& draw);
 bool NoteDraw(const DrawCall& draw)
 {
+    ++g_drawSerial;
+    // (For the trace: all the mod's own work around the game's draws, timed.)
+    const auto start = std::chrono::steady_clock::now();
+    const bool terrain = g_terrain.isTerrain;
+    const bool drawIt = NoteDrawInner(draw);
+    if (!terrain)
+        postfx::NoteDrawHooks(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+    return drawIt;
+}
+
+bool NoteDrawInner(const DrawCall& draw)
+{
+    // (For the trace: every 8th draw's own parts timed - snapshots, checks, bones, wheels, shadow,
+    // dirt, wet - each counted 8 times over; see postfx::NoteDrawParts.)
+    static unsigned sampled = 0;
+    const bool timed = (++sampled & 7) == 0;
+    LARGE_INTEGER partAt = {};
+    if (timed)
+        QueryPerformanceCounter(&partAt);
+    const auto Part = [&](int k) {
+        if (!timed)
+            return;
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        postfx::NoteDrawPart(k, now.QuadPart - partAt.QuadPart);
+        partAt = now;
+    };
     // Everything drawn so far this frame is the sky (and what sits at infinity with it): a picture of
     // it for the effects, before the first draw placed in the world (the terrain, or anything moved).
     // And everything solid, at the first see-through draw placed in the world once the terrain's done
@@ -6497,8 +6693,11 @@ bool NoteDraw(const DrawCall& draw)
     }
     if (!g_depthWrites && !g_terrain.isTerrain && postfx::WantsSeeThroughDepth())
         KeepSeeThrough(draw);
+    Part(0);
     if (!g_terrain.isTerrain && postfx::WantsSceneEnd())
         CheckSceneEnd();
+    if (timed)  // (the scene's end - the shadow flush, the effects - timed on its own: not in the parts)
+        QueryPerformanceCounter(&partAt);
     if (!g_terrain.isTerrain) {
         if (postfx::HidesGameFlare() && IsGameFlare()) {
             DumpCall("^ SKIPPED  the game's lens flare (a time of day is set)");
@@ -6522,7 +6721,9 @@ bool NoteDraw(const DrawCall& draw)
                 HasTranslation(mv->second.raw))
                 postfx::NoteDrawAfterScene(g_program);
         }
+        Part(1);
         PrepareSkinnedDraw();
+        Part(2);
         // Every bike's wheels (lobby_wheels.h): this rigid 3D draw, by its mesh and where it is.
         {
             const auto mv = g_programModelview.find(g_program);
@@ -6542,13 +6743,17 @@ bool NoteDraw(const DrawCall& draw)
                 }
             }
         }
+        Part(3);
         if (postfx::WantsShadowCasters() || postfx::WantsWheelMask()) {
             const auto castStart = std::chrono::steady_clock::now();
             CastShadow(draw);
             postfx::NoteCastNowMs(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - castStart).count());
         }
+        Part(4);
         PaintBikeDirt(draw, PaintTireDirt(draw));
+        Part(5);
         PaintWet();
+        Part(6);
         return true;
     }
     const auto found = g_elementBuffers.find(g_vao);
