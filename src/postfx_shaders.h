@@ -240,6 +240,7 @@ uniform float u_shadowBias[4];
 uniform float u_shadowTexelWorld[4];  // one texel of each cascade on the ground, game units
 uniform float u_shadowSoft;     // 0..1: how soft detailed shadows' edges are (Config::shadowSoftness)
 uniform float u_shadowGround;   // 1: ground turned from the sun shaded (Config::shadowGround)
+uniform float u_groundBright;   // 1..3: the ground alone brighter (Config::groundBrightness)
 uniform float u_shadowCast;     // 0: nothing cast into the map (bikes and objects both off): not looked up
 uniform vec3  u_lightView;      // toward the light, view space
 uniform float u_headlight;      // 0 = off
@@ -1412,6 +1413,9 @@ void main()
             albedo = c * ao;
             // (Overcast in the snow: the sun's shadows fade, the light comes from the whole sky.)
             c *= ao * mix(1.0, mix(0.42, 1.0, lit), u_shadow * (1.0 - 0.65 * u_overcast));
+            // Ground brightness: dark ground by all of it, sunny ground by a third, snow hardly.
+            if (u_groundBright > 1.0)
+                c *= 1.0 + (u_groundBright - 1.0) * ground * mix(1.0, 0.35, smoothstep(0.01, 0.12, Luma(c))) * (1.0 - 0.8 * snowCover);
             // Snow in shade (the sun's shadow, a crease) is lit by the sky alone: cold, blue-grey.
             if (snowCover > 0.0)
                 c *= mix(vec3(1.0), vec3(0.84, 0.92, 1.1),

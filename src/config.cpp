@@ -358,6 +358,7 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Graphics",  L"ShadowBikes",          c.shadowBikes ? 1.0 : 0.0 },
         { L"Graphics",  L"ShadowObjects",        c.shadowObjects ? 1.0 : 0.0 },
         { L"Graphics",  L"ShadowGround",         c.shadowGround ? 1.0 : 0.0 },
+        { L"Graphics",  L"GroundBrightness",     c.groundBrightness },
         { L"Graphics",  L"ShadowSoftness",       c.shadowSoftness },
         { L"Graphics",  L"Headlight",            c.headlight },
         { L"Graphics",  L"HeadlightBeamDeg",     c.headlightBeamDeg },
@@ -584,6 +585,7 @@ void CopyTunables(const Config& from, Config& to)
     to.shadowBikes          = from.shadowBikes;
     to.shadowObjects        = from.shadowObjects;
     to.shadowGround         = from.shadowGround;
+    to.groundBrightness     = from.groundBrightness;
     to.shadowMapSize        = from.shadowMapSize;
     to.headlight            = from.headlight;
     to.headlightBeamDeg     = from.headlightBeamDeg;
@@ -901,6 +903,7 @@ Config ParseConfig(const Config& base)
     c.shadowBikes      = ReadInt(L"Graphics", L"ShadowBikes", c.shadowBikes) != 0;
     c.shadowObjects    = ReadInt(L"Graphics", L"ShadowObjects", c.shadowObjects) != 0;
     c.shadowGround     = ReadInt(L"Graphics", L"ShadowGround", c.shadowGround) != 0;
+    c.groundBrightness = ReadDouble(L"Graphics", L"GroundBrightness", c.groundBrightness);
     c.shadowMap        = ReadInt(L"Graphics", L"ShadowMap", c.shadowMap) != 0;
     // Shadow distance in real metres (ShadowDistanceM). The old ShadowDistance was used in the
     // game's own unit, feet, though it said metres: read as that, so it covers what it did.
@@ -1062,6 +1065,7 @@ Config ParseConfig(const Config& base)
     c.shadowResolution     = c.shadowResolution < 0 ? 0 : c.shadowResolution > 2 ? 2 : c.shadowResolution;
     c.shadowMapSize        = 2048 << c.shadowResolution;
     c.shadowSoftness       = Clamp(c.shadowSoftness, 0.0, 1.0);
+    c.groundBrightness     = Clamp(c.groundBrightness, 1.0, 3.0);
     c.headlight            = Clamp(c.headlight, 0.0, 1.0);
     c.headlightBeamDeg     = Clamp(c.headlightBeamDeg, 5.0, 90.0);
     c.headlightForward     = Clamp(c.headlightForward, -3.0, 3.0);

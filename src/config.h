@@ -129,6 +129,7 @@ struct Config {
     int    shadowMapSize    = 2048;       // texels per side (from shadowResolution)
     bool   shadowBikes      = true;       // detailed shadows: bikes and riders cast them (yours and everyone's)
     bool   shadowObjects    = true;       // detailed shadows: everything else solid casts them (track objects, trees, stands)
+    double groundBrightness = 1.0;        // 1..3: the ground alone brighter, its dark places (berms in shade) the most
     bool   shadowGround     = true;       // detailed shadows: the ground turned away from the sun is shaded (berm faces, slopes)
     double shadowSoftness   = 0.5;        // 0..1 detailed shadows' edges: 0 crisp, 1 soft (and the steps a
                                           // low sun leaves on a berm's face smoothed the most)

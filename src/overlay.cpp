@@ -1538,6 +1538,9 @@ const RowDef kRows[] = {
     Toggle(kTabGraphics, nullptr,           "Ground shading",       &Config::shadowGround)
         .Help("Detailed shadows: the ground turned away from the sun (berm faces, the back of jumps) is "
               "shaded. No cost either way."),
+    Slider(kTabGraphics, nullptr,           "Ground brightness",    &Config::groundBrightness, 1.0,   3.0,   0.05,   100.0,  0, "%", "Normal")
+        .Help("Brightens only the ground, its dark places the most: berm faces and ruts in deep shade. Bikes, "
+              "riders, objects and the sky stay as they are."),
     Choice3(kTabGraphics, nullptr,          "Shadow resolution",    &Config::shadowResolution, "2048", "4096", "8192")
         .Help("Detailed shadows: how sharp they are, near and far. Higher is sharper, at the cost of "
               "graphics memory and speed (8192 is for high-end graphics cards)."),

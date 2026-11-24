@@ -6754,6 +6754,7 @@ void Render(int w, int h)
         g_gl.Uniform1f(p["u_ownDepthOn"], g_frame.seeShot && g_frame.ownDepth ? 1.0f : 0.0f);
         // Always on its own unit: a shadow sampler may not share one with an ordinary sampler.
         Bind(p, "u_shadowMap", 5, g_res.shadowMap);
+        g_gl.Uniform1f(p["u_groundBright"], static_cast<float>(cfg.groundBrightness));
         g_gl.Uniform1f(p["u_shadowMapOn"], shadowMapOn ? 1.0f : 0.0f);
         g_gl.Uniform1f(p["u_shadowView"], static_cast<float>(cfg.shadowView));
         if (shadowMapOn) {
@@ -8400,7 +8401,7 @@ void TerrainPassDone()
 {
     g_frame.terrainDone = true;
     const Config& cfg = GetConfig();
-    if (!cfg.shaders || (cfg.dirtDetail <= 0.0 && cfg.tireMarks <= 0.0 && TireCoat(cfg) <= 0.0 && cfg.weather == kWeatherNone && !RoostOn(cfg)) || !g_frame.haveView || g_frame.terrainSnapshot || g_frame.applied ||
+    if (!cfg.shaders || (cfg.dirtDetail <= 0.0 && cfg.tireMarks <= 0.0 && TireCoat(cfg) <= 0.0 && cfg.weather == kWeatherNone && !RoostOn(cfg) && cfg.groundBrightness <= 1.0) || !g_frame.haveView || g_frame.terrainSnapshot || g_frame.applied ||
         g_res.failed || !LoadGL())
         return;
     GLint drawFb = 0;

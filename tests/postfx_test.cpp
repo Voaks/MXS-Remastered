@@ -555,6 +555,12 @@ int main(int argc, char** argv)
                          rgb[1] / 255.0f, rgb[2] / 255.0f);
                 source = text;
             }
+            // (MXCAM_TEST_AMBIENT=0.08: lit as the game lights it - the left half in the sun too, the right by the
+            // ambient light alone, as ground turned away from the sun.)
+            if (getenv("MXCAM_TEST_AMBIENT"))
+                source = "uniform vec4 u_ambient; uniform vec3 u_diffuse, u_light_position; uniform vec3 u_testup; void main() { "
+                         "gl_FragColor = vec4(vec3(0.65, 0.52, 0.39) * (u_ambient.rgb + u_diffuse * "
+                         "(gl_FragCoord.x < 480.0 ? max(dot(u_testup, u_light_position), 0.0) : 0.0)), 1.0); }";
             // (MXCAM_TEST_GROUND_BLOTCHES=1: dark and light blotches on it, as a track's dirt texture.)
             if (getenv("MXCAM_TEST_GROUND_BLOTCHES")) {
                 const size_t at = source.find("gl_FragColor = vec4(");
@@ -1078,6 +1084,21 @@ int main(int argc, char** argv)
 
         // Terrain: an 8 x 8 grid of 25 m patches around the camera. Its first u_modelview is the camera.
         gl.UseProgram(terrain);
+        if (const char* ambient = getenv("MXCAM_TEST_AMBIENT")) {  // (set every other frame: it must hold between)
+            using PFN_Uniform4fv = void(APIENTRY*)(GLint, GLsizei, const GLfloat*);
+            static const auto uniform4 = reinterpret_cast<PFN_Uniform4fv>(p_wglGetProcAddress("glUniform4fv"));
+            static const GLint at = gl.GetUniformLocation(terrain, "u_ambient");
+            const float a = static_cast<float>(atof(ambient)), light[4] = { a, a, a, 1.0f };
+            static const GLint diffuseAt = gl.GetUniformLocation(terrain, "u_diffuse"), lightAt = gl.GetUniformLocation(terrain, "u_light_position"),
+                               upAt = gl.GetUniformLocation(terrain, "u_testup");
+            const float upEye[3] = { view[4], view[5], view[6] }, sun[3] = { 0.61f, 0.61f, 0.61f };
+            gl.Uniform3fv(lightAt, 1, upEye);  // (a sun straight up: flat ground gets all of u_diffuse)
+            gl.Uniform3fv(upAt, 1, upEye);
+            if (frameIndex % 2 == 0) {
+                uniform4(at, 1, light);
+                gl.Uniform3fv(diffuseAt, 1, sun);
+            }
+        }
         gl.UniformMatrix4fv(tMv, 1, GL_FALSE, view);
         gl.UniformMatrix4fv(tProj, 1, GL_FALSE, projection);
         gl.BindVertexArray(arrays[0]);

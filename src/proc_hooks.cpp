@@ -1761,6 +1761,19 @@ const GLfloat* CorrectEnvMatrix(GLint location, GLsizei count, GLboolean transpo
 }
 
 // Some engines upload matrices as arrays of vec4.
+// The ground's ambient light (Config::groundBrightness): the terrain program's u_ambient, as RaiseGroundAmbient
+// has it.
+struct GroundAmbient {
+    GLuint   program = 0;
+    GLint    location = -1, diffuse = -1, light = -1;
+    bool     fresh = false;   // the game gave its own since
+    bool     raised = false;  // ours is in the program
+    unsigned frame = 0;
+    double   brightness = 1.0;
+    bool     told = false;
+};
+GroundAmbient g_groundAmbient;
+
 void APIENTRY Wrap_glUniform4fv(GLint location, GLsizei count, const GLfloat* value)
 {
     DumpUniform("glUniform4fv", g_program, location, count, 0, value, 4);
@@ -1768,6 +1781,8 @@ void APIENTRY Wrap_glUniform4fv(GLint location, GLsizei count, const GLfloat* va
     const GLfloat* up = CorrectLight(location, count, value, 4, scratch);
     NoteUniformValue(location, count, 5, up, 0);
     real_glUniform4fv(location, count, up);
+    if (location == g_groundAmbient.location && g_program == g_groundAmbient.program)
+        g_groundAmbient.fresh = true;  // (the game's own again: see RaiseGroundAmbient)
 }
 
 void APIENTRY Wrap_glUniform4fvARB(GLint location, GLsizei count, const GLfloat* value)
@@ -1799,6 +1814,8 @@ void APIENTRY Wrap_glUniform3fv(GLint location, GLsizei count, const GLfloat* va
     const GLfloat* up = CorrectLight(location, count, value, 3, scratch);
     NoteUniformValue(location, count, 4, up, 0);
     real_glUniform3fv(location, count, up);
+    if (location == g_groundAmbient.diffuse && g_program == g_groundAmbient.program)
+        g_groundAmbient.fresh = true;  // (the game's own again: see RaiseGroundAmbient)
 }
 
 void APIENTRY Wrap_glUniform3fvARB(GLint location, GLsizei count, const GLfloat* value)
@@ -7472,6 +7489,92 @@ bool NoteDraw(const DrawCall& draw)
     return drawIt;
 }
 
+// Ground brightness, the light itself: ground turned away from the sun has only the track's ambient light,
+// and on some tracks that's next to nothing (0.08, where most have 0.35) - black berms, which brightening
+// the picture can't help (nothing to brighten, and Contrast cuts it to black). So the terrain's u_ambient is
+// raised with the slider, toward 0.5 at its most, in the track's own ambient colour, and the sun's share
+// (u_diffuse) lowered so flat ground in the sun gets as much as before: sunny dirt doesn't wash out. Before the
+// game's first terrain draw of the frame, and again if the game gives its own; its own put back when the
+// slider's at 100%.
+void RaiseGroundAmbient()
+{
+    GroundAmbient& g = g_groundAmbient;
+    const Config& cfg = GetConfig();
+    const double brightness = cfg.shaders ? cfg.groundBrightness : 1.0;
+    if (g.program == g_program && !g.fresh && g.frame == g_frameNumber && g.brightness == brightness)
+        return;
+    if (brightness <= 1.0 && !(g.raised && g.program == g_program)) {
+        g.frame = g_frameNumber;
+        g.brightness = brightness;
+        g.fresh = false;
+        return;
+    }
+    if (g.program != g_program) {
+        g = GroundAmbient{};
+        g.program = g_program;
+        if (real_glGetUniformLocation) {
+            g.location = real_glGetUniformLocation(g_program, "u_ambient");
+            g.diffuse = real_glGetUniformLocation(g_program, "u_diffuse");
+            g.light = real_glGetUniformLocation(g_program, "u_light_position");
+        }
+    }
+    g.frame = g_frameNumber;
+    g.brightness = brightness;
+    g.fresh = false;
+    if (g.location < 0 || !real_glUniform4fv)
+        return;
+    // (The game's own, from what it sent: the mod's uploads here aren't followed.)
+    const auto uniforms = g_programUniforms.find(g_program);
+    if (uniforms == g_programUniforms.end() || uniforms->second.now.size() <= static_cast<size_t>(g.location) ||
+        uniforms->second.now[static_cast<size_t>(g.location)].kind != 5) {
+        if (!g.told) {
+            g.told = true;
+            Log("ground brightness: the game hasn't sent the ground's ambient light (program %u): left as it is", g_program);
+        }
+        return;
+    }
+    const std::vector<UniformSlot>& now = uniforms->second.now;
+    const GLfloat* own = now[static_cast<size_t>(g.location)].v;
+    const auto Vector = [&now](GLint location) {
+        const bool known = location >= 0 && static_cast<size_t>(location) < now.size() && now[static_cast<size_t>(location)].kind == 4;
+        return known ? now[static_cast<size_t>(location)].v : nullptr;
+    };
+    const GLfloat* sun = real_glUniform3fv ? Vector(g.diffuse) : nullptr;
+    if (brightness <= 1.0) {
+        real_glUniform4fv(g.location, 1, own);
+        if (sun)
+            real_glUniform3fv(g.diffuse, 1, sun);
+        g.raised = false;
+        return;
+    }
+    const double most = std::max({ own[0], own[1], own[2] });
+    const double add = std::max(0.5 - most, 0.0) * 0.5 * (brightness - 1.0);
+    GLfloat raised[4];
+    for (int k = 0; k < 3; ++k)
+        raised[k] = static_cast<GLfloat>(own[k] + add * (most > 0.01 ? own[k] / most : 1.0));
+    raised[3] = own[3];
+    real_glUniform4fv(g.location, 1, raised);
+    // (What flat ground gets of the sun: its direction, as sent, up in the view it was sent in.)
+    const GLfloat* light = Vector(g.light);
+    double view[16], up[3], keep = 1.0;
+    if (sun && light && postfx::FrameRenderedView(view, up)) {
+        double flat = 0.0;
+        for (int r = 0; r < 3; ++r)
+            flat += light[r] * (view[r] * up[0] + view[4 + r] * up[1] + view[8 + r] * up[2]);
+        const double share = std::max({ sun[0], sun[1], sun[2] }) * flat;
+        if (share > 0.02)
+            keep = std::min(std::max((share - add) / share, 0.25), 1.0);
+        const GLfloat less[3] = { static_cast<GLfloat>(sun[0] * keep), static_cast<GLfloat>(sun[1] * keep), static_cast<GLfloat>(sun[2] * keep) };
+        real_glUniform3fv(g.diffuse, 1, less);
+    }
+    g.raised = true;
+    if (!g.told) {
+        g.told = true;
+        Log("ground brightness: the track's ambient light on the ground %.2f %.2f %.2f, raised to %.2f %.2f %.2f, the sun's x%.2f "
+            "(program %u, %.0f%%)", own[0], own[1], own[2], raised[0], raised[1], raised[2], keep, g_program, brightness * 100.0);
+    }
+}
+
 bool NoteDrawInner(const DrawCall& draw, bool timed)
 {
     // (For the trace: every 8th draw's own parts timed - snapshots, checks, bones, wheels, shadow,
@@ -7578,6 +7681,7 @@ bool NoteDrawInner(const DrawCall& draw, bool timed)
         Part(6);
         return true;
     }
+    RaiseGroundAmbient();
     const auto found = g_elementBuffers.find(g_vao);
     const GLuint elementBuffer = found != g_elementBuffers.end() ? found->second : 0;
     if (IsDumping())
