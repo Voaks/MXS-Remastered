@@ -577,6 +577,7 @@ struct ShadowFrame {
     double cascadeHalf[kCascades] = {};          // half the side of each cascade's square
     double cascadeX[kCascades] = {}, cascadeY[kCascades] = {};  // its centre in the sun's view
     float  cascadeProjection[kCascades][16] = {};
+    double reach = 0.0;         // game units: nothing further than this from the camera is in any cascade
 };
 ShadowFrame g_shadow;
 
@@ -1293,6 +1294,13 @@ void SetupShadowFrame()
     }
     g_shadow.half = half;
     g_shadow.depth = depth;
+    // (How far from the camera anything in a cascade can be: across, its square's furthest corner
+    // with the margin ShadowMatrices gives a box, and along the light, the depth. Slightly over.)
+    double across = 0.0;
+    for (int c = 0; c < kCascades; ++c)
+        across = std::fmax(across, std::fmax(std::fabs(g_shadow.cascadeX[c]), std::fabs(g_shadow.cascadeY[c])) + g_shadow.cascadeHalf[c]);
+    across += 1.0 * UnitsPerMetre();
+    g_shadow.reach = 1.01 * std::sqrt(2.0 * across * across + depth * depth) + 1.0;
     g_shadow.usable = true;
 }
 
@@ -6702,7 +6710,14 @@ void Render(int w, int h)
     // screen-space shadows are left out then. Seen only from what's on screen, they had the ground
     // shade itself (a dark smudge on berms in corners) and shadows that moved with your bike and
     // went away as you drove over them.
-    const bool shadowMapOn = depthOk && g_shadow.usable && g_shadow.drawn && g_res.shadowMap && shadowAmount > 0.0;
+    // (Bike & rider shadows and Object shadows both off: nothing casts, and no map is made at all - the
+    // detailed shadows' way of lighting stays, with the ground's shading if that's on, and nothing looked
+    // up in a map: shadowCast off.)
+    const bool mapCasting = cfg.shadowBikes || cfg.shadowObjects;
+    if (!mapCasting && cfg.shadowMap && !g_shadow.setup)
+        SetupShadowFrame();  // (only whether the sun's up for it: nothing drawn)
+    const bool shadowMapOn = depthOk && g_shadow.usable && shadowAmount > 0.0 &&
+                             (mapCasting ? g_shadow.drawn && g_res.shadowMap : cfg.shadowMap);
     const bool screenShadows = shadowAmount > 0.0 && !shadowMapOn;
     const bool lightOn = depthOk && (cfg.ambientOcclusion > 0.0 || screenShadows);
     if (lightOn) {
@@ -6758,7 +6773,9 @@ void Render(int w, int h)
             g_gl.Uniform1fv(p["u_shadowBias[0]"], kCascades, bias);
             g_gl.Uniform1fv(p["u_shadowTexelWorld[0]"], kCascades, texelWorld);
             g_gl.Uniform1f(p["u_shadowSoft"], static_cast<float>(cfg.shadowSoftness));
-            g_gl.Uniform1f(p["u_shadowTexel"], 1.0f / g_res.shadowSize);
+            g_gl.Uniform1f(p["u_shadowGround"], cfg.shadowGround ? 1.0f : 0.0f);
+            g_gl.Uniform1f(p["u_shadowCast"], mapCasting ? 1.0f : 0.0f);
+            g_gl.Uniform1f(p["u_shadowTexel"], 1.0f / std::max(g_res.shadowSize, 1));
         }
         Vec(p, "u_lightView", lightView);
         // The headlight: only when the time of day makes it dark enough to see.
@@ -7317,7 +7334,7 @@ void LogStandIn(int which, const char* text)
 void DrawStandIns()
 {
     const Config& cfg = GetConfig();
-    if (!cfg.shaders || !cfg.shadowMap || cfg.shadows <= 0.0 || !g_frame.haveView || !g_rider.seen)
+    if (!cfg.shaders || !cfg.shadowMap || !cfg.shadowBikes || cfg.shadows <= 0.0 || !g_frame.haveView || !g_rider.seen)
         return;
     const double u = g_unitsPerMetre;
     bool head = false, torso = false;
@@ -7583,6 +7600,9 @@ double g_drawHooksMs = 0, g_drawHooksMsTraced = 0;
 int g_drawHooks = 0, g_drawHooksTraced = 0;
 long long g_flushIndices[4] = {};
 long long g_drawParts[7] = {}, g_drawPartsTraced[7] = {};
+int    g_seeFar = 0, g_seeFarTraced = 0;
+int    g_seeRedrawn = 0, g_seeRedrawnTraced = 0, g_seeCalls = 0, g_seeCallsTraced = 0, g_seeFlushes = 0, g_seeFlushesTraced = 0;
+double g_seeRedrawMs = 0, g_seeRedrawMsTraced = 0, g_seeReadyMs = 0, g_seeReadyMsTraced = 0;
 // And how many depth samples the held-back casters wrote into the shadow map (GL_SAMPLES_PASSED,
 // read the same few frames later): none at all while things should be casting = drawn but thrown away.
 constexpr GLenum kSamplesPassed = 0x8914;
@@ -7686,6 +7706,18 @@ void ApplyInner()
     for (int i = 0; i < 4; ++i)
         g_gameViewport[i] = saved.viewport[i];
     DrawStandIns();       // (its program and vertex array are put back with the rest)
+    // With nothing at all cast this frame (Bike & rider shadows and Object shadows both off, or nothing in
+    // reach), the map is still made, empty: the ground's shading and the shadow map's way of lighting
+    // stay, and the screen-space shadows (the berm smudge) don't come back in its place.
+    {
+        const Config& c = GetConfig();
+        if (c.shaders && c.shadowMap && (c.shadowBikes || c.shadowObjects) && c.shadows > 0.0 && g_frame.haveView) {
+            if (!g_shadow.setup)
+                SetupShadowFrame();
+            if (g_shadow.usable && !g_shadow.drawn && BeginShadowDraw())
+                EndShadowDraw();
+        }
+    }
     PrepareState();
     if (EnsureResources(w, h)) {
         if (!g_loggedFirstApply) {
@@ -7772,7 +7804,7 @@ OwnSaved g_ownSaved;
 bool WantsShadowCasters()
 {
     const Config& cfg = GetConfig();
-    return cfg.shaders && cfg.shadowMap && cfg.shadows > 0.0 && g_frame.haveView && !g_frame.applied && !g_res.failed &&
+    return cfg.shaders && cfg.shadowMap && (cfg.shadowBikes || cfg.shadowObjects) && cfg.shadows > 0.0 && g_frame.haveView && !g_frame.applied && !g_res.failed &&
            g_glState >= 0 && (!g_shadow.setup || g_shadow.usable);
 }
 
@@ -7889,6 +7921,18 @@ bool ShadowMatrices(const float uploaded[16], const float* anchorEye, float ligh
     ToFloat(toLight, lightModelview, 16);
     return true;
 }
+
+bool ShadowReach(double* units)
+{
+    if (!g_shadow.setup)
+        SetupShadowFrame();
+    if (!g_shadow.usable)
+        return false;
+    *units = g_shadow.reach;
+    return true;
+}
+
+void NoteBoxedOut() { ++g_castBoxed[0]; }
 
 bool FrameRenderedView(double rendered[16], double up[3])
 {
@@ -8281,7 +8325,7 @@ bool WantsSeeThroughDepth()
 {
     const Config& cfg = GetConfig();
     static const bool off = GetEnvironmentVariableA("MXCAM_TEST_NO_OWNDEPTH", nullptr, 0) > 0;  // (tests: the old way)
-    if (off || !g_frame.seeShot || g_frame.applied || !cfg.shaders || g_res.failed || !g_res.ownOk)
+    if (off || cfg.seeThroughDepth == 0 || !g_frame.seeShot || g_frame.applied || !cfg.shaders || g_res.failed || !g_res.ownOk)
         return false;
     // Always (with the snapshot): it hazes them by their own distance in weather and at dusk, and it's
     // what tells a decal lying on the ground from a tree standing in front of it. (By day without
@@ -8607,6 +8651,11 @@ const char* WheelTraceText()
                  g_drawPartsTraced[1] * msPerTick, g_drawPartsTraced[2] * msPerTick, g_drawPartsTraced[3] * msPerTick,
                  g_drawPartsTraced[4] * msPerTick, g_drawPartsTraced[5] * msPerTick, g_drawPartsTraced[6] * msPerTick);
     }
+    n = static_cast<int>(strlen(text));
+    snprintf(text + n, sizeof text - n, ",%d,%d,%d,%.2f,%.2f", g_seeRedrawnTraced, g_seeCallsTraced, g_seeFlushesTraced, g_seeRedrawMsTraced,
+             g_seeReadyMsTraced);
+    n = static_cast<int>(strlen(text));
+    snprintf(text + n, sizeof text - n, ",%d", g_seeFarTraced);
     for (auto& kind : g_replays)
         for (int& c : kind)
             c = 0;
@@ -8811,6 +8860,23 @@ bool OwnRiderEye(float out[3])
     return true;
 }
 
+int LastRiderHipsEye(float (*out)[3], int most)
+{
+    if (!g_frame.haveView)
+        return 0;
+    int n = 0;
+    for (const Vec3& h : g_lastRiderHips) {
+        if (n >= most)
+            break;
+        const Vec3 e = TransformPoint(g_frame.rendered, h);
+        out[n][0] = static_cast<float>(e.x);
+        out[n][1] = static_cast<float>(e.y);
+        out[n][2] = static_cast<float>(e.z);
+        ++n;
+    }
+    return n;
+}
+
 bool NearAnyRiderEye(const float eye[3], double metres)
 {
     double inv[16];
@@ -8827,6 +8893,14 @@ bool NearAnyRiderEye(const float eye[3], double metres)
 bool CameraAtYourHead() { return g_cameraAtHead; }
 void NoteCastNowMs(double ms) { g_castNowMs += ms; }
 void NoteDrawHooks(double ms) { g_drawHooksMs += ms; ++g_drawHooks; }
+void NoteSeeThroughFlush(int draws, int calls, double ms, double readyMs)
+{
+    g_seeReadyMs += readyMs;
+    g_seeRedrawn += draws;
+    g_seeCalls += calls;
+    ++g_seeFlushes;
+    g_seeRedrawMs += ms;
+}
 void NoteDrawPart(int part, long long ticks)
 {
     if (part >= 0 && part < 7)
@@ -8839,6 +8913,8 @@ void NoteFlushIndices(int cascade, long long indices)
 }
 void NoteLobbyMs(double ms) { g_lobbyMs = ms; }
 void RequestMarksDump() { g_markDumpWanted = true; g_aoDumpWanted = true; }
+bool PicturesThisFrame() { return g_aoDumpWanted; }
+void NoteSeeThroughFar() { ++g_seeFar; }
 
 bool OwnHipsEye(float out[3])
 {
@@ -8923,6 +8999,16 @@ void FrameEnd(bool apply)
         g_drawPartsTraced[k] = g_drawParts[k];
         g_drawParts[k] = 0;
     }
+    g_seeRedrawnTraced = g_seeRedrawn;
+    g_seeCallsTraced = g_seeCalls;
+    g_seeFlushesTraced = g_seeFlushes;
+    g_seeRedrawMsTraced = g_seeRedrawMs;
+    g_seeReadyMsTraced = g_seeReadyMs;
+    g_seeReadyMs = 0;
+    g_seeFarTraced = g_seeFar;
+    g_seeFar = 0;
+    g_seeRedrawn = g_seeCalls = g_seeFlushes = 0;
+    g_seeRedrawMs = 0;
     // The dab indicator's rider, when the effects didn't look for it this frame (shaders off).
     if ((cfg.dabIndicator || cfg.brakeSqueal > 0.0 || cfg.controllerLook) && g_frame.haveView && !g_riderThisFrame &&
         LoadGL()) {

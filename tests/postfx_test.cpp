@@ -339,6 +339,8 @@ int main(int argc, char** argv)
         settings = base + "[Weather]\nSnow=1\nSnowfall=0\nWind=0\nSnowSound=0\nSnowTires=0\n" +
                    (getenv("MXCAM_TEST_SNOW_AMOUNT") ? "SnowAmount=" + std::string(getenv("MXCAM_TEST_SNOW_AMOUNT")) + "\n"
                                                      : std::string());
+    else if (mode == "crowd" || mode == "crowdstream" || mode == "crowdperf" || mode == "crowdtex" || mode == "crowdtexperf" || mode == "crowdfar")  // a crowd at dusk (its haze goes by its own distance)
+        settings = base.replace(base.find("TimeOfDay=-1"), 12, "TimeOfDay=17.6");
     else if (mode == "rain" || mode == "rainperf" || mode == "treefogperf")
         settings = base + "[Weather]\nRain=1\nRainfall=1\nRainWind=0.3\nWetness=0.8\nPuddles=" +
                    std::string(getenv("MXCAM_TEST_PUDDLES") ? getenv("MXCAM_TEST_PUDDLES") : "0.8") + "\nReflections=1\n";
@@ -426,6 +428,17 @@ int main(int argc, char** argv)
                 ch = '\n';
         settings += "\n" + more + "\n";
     }
+    // MXCAM_TEST_GRAPHICS: more [Graphics] settings for any mode ("ShadowObjects=0|ShadowGround=0"), put into
+    // the mode's own [Graphics] section (a second one isn't read). Not for the checks: they're the mode's own.
+    if (const char* graphics = getenv("MXCAM_TEST_GRAPHICS")) {
+        std::string more = graphics;
+        for (char& ch : more)
+            if (ch == '|')
+                ch = '\n';
+        const size_t at = settings.find("[Graphics]\n");
+        if (at != std::string::npos && !more.empty())
+            settings.insert(at + 11, more + "\n");
+    }
     // MXCAM_TEST_INI_FILE: these settings instead of the mode's (a player's own ini, to see their picture).
     if (const char* file = getenv("MXCAM_TEST_INI_FILE")) {
         if (FILE* in = fopen(file, "rb")) {
@@ -497,7 +510,7 @@ int main(int argc, char** argv)
     }
     // Timing: not held to the screen's refresh (every frame took exactly 1 / refresh otherwise).
     if (mode == "shadowperf" || mode == "shadowperf0" || mode == "snowperf" || mode == "snowperf0" || mode == "dirtperf" ||
-        mode == "ultraperf" || mode == "rainperf" || mode == "treefogperf") {
+        mode == "ultraperf" || mode == "rainperf" || mode == "treefogperf" || mode == "crowdperf" || mode == "crowdtexperf") {
         using PFN_SwapInterval = BOOL(WINAPI*)(int);
         if (const auto swapInterval = reinterpret_cast<PFN_SwapInterval>(p_wglGetProcAddress("wglSwapIntervalEXT")))
             swapInterval(0);
@@ -667,6 +680,48 @@ int main(int argc, char** argv)
         }
         gl.GenVertexArrays(1, &farArray);
         mesh(farArray, farVertices.data(), farVertices.size() * sizeof(float), 3, farIndices.data(), farIndices.size() * 2);
+    }
+    // crowd / crowdstream / crowdperf: 1200 people (thin upright boxes, 1.8 high) in one world-space buffer,
+    // 20 to 60 units ahead, drawn one at a time without depth - all with the same state, each its own range
+    // of the indices, as the game draws a track's crowd. (crowdstream, crowdperf: the buffer written afresh
+    // before every 300 of them, as the game streams its crowd: the mod draws them again for their depth in
+    // goes.) The mod's own depth of them must come out the same however it draws them again.
+    constexpr int kCrowd = 1200;
+    GLuint crowdArray = 0, crowdBuffers[2] = {};
+    std::vector<float> crowdVertices;
+    // (crowdtex: as crowdstream, each person with a texture of its own - one of three, in turn - as the game's
+    // crowd is, and every 7th one thrown away by its colour uniform, as a faded rider is: drawn again one by
+    // one, with only what changed sent again.)
+    // (crowdfar: as crowdtex, its rows spread out to ~250 units off - most of it beyond 50 m in the game's
+    // feet, where small see-through things aren't drawn again for their depth.)
+    const bool crowdTex = mode == "crowdtex" || mode == "crowdtexperf" || mode == "crowdfar";
+    const bool crowdScene = mode == "crowd" || mode == "crowdstream" || mode == "crowdperf" || crowdTex;
+    GLuint crowdTextures[3] = {};
+    if (crowdScene) {
+        std::vector<unsigned short> crowdIndices;
+        for (int k = 0; k < kCrowd; ++k) {
+            const float bx = -24.0f + (k % 60) * 0.8f + (k / 60 % 2) * 0.4f,
+                        bz = -20.0f - (k / 60) * (mode == "crowdfar" ? 12.0f : 2.0f);
+            for (int v = 0; v < 8; ++v) {
+                crowdVertices.push_back(cube[v * 3] * 0.5f + bx);
+                crowdVertices.push_back(cube[v * 3 + 1] * 1.8f);
+                crowdVertices.push_back(cube[v * 3 + 2] * 0.3f + bz);
+            }
+            for (int i = 0; i < 36; ++i)
+                crowdIndices.push_back(static_cast<unsigned short>(cubeIndices[i] + (k % 2000) * 8));
+        }
+        if (crowdTex) {
+            p_glGenTextures(3, crowdTextures);
+            for (int t = 0; t < 3; ++t) {
+                const unsigned char texel[4] = { static_cast<unsigned char>(80 * t), 120, 200, 255 };
+                p_glBindTexture(GL_TEXTURE_2D, crowdTextures[t]);
+                p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel);
+            }
+            p_glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        gl.GenVertexArrays(1, &crowdArray);
+        mesh(crowdArray, crowdVertices.data(), crowdVertices.size() * sizeof(float), 3, crowdIndices.data(), crowdIndices.size() * 2,
+             crowdBuffers);
     }
     // A roof (stadium): the cube made 400 units across in its own vertices (a big model, not a
     // scaled matrix: that's how the HUD is told apart).
@@ -926,7 +981,8 @@ int main(int argc, char** argv)
     const bool snowTiming = mode == "snowperf" || mode == "snowperf0" ||  // timing: snow at 100% / off,
                             mode == "dirtperf" || mode == "ultraperf" ||  // the dirt detail, without and with Ultra,
                             mode == "rainperf" ||                         // rain at 100%,
-                            mode == "treefogperf";                        // and with 800 see-through draws
+                            mode == "treefogperf" ||                      // and with 800 see-through draws,
+                            mode == "crowdperf" || mode == "crowdtexperf"; // and a crowd of 1200 (see crowd below)
     // shadowfar: as shadowperf, plus 2400 boxes placed in world space (their vertices where they stand,
     // drawn with the bare view, as the game draws much of a track's scenery), nearly all far outside the
     // shadow distance: none of those may cost the shadow map anything.
@@ -1174,6 +1230,23 @@ int main(int argc, char** argv)
                 gl.BindVertexArray(arrays[1]);
                 p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
             }
+            // MXCAM_TEST_BESIDE (backshadow, rearhidden): beside your rider a box upright, a leaning one that stays where
+            // it is in the world (a tuff block: your rider comes up to it in rearhidden) and a leaning one that goes
+            // with it (a bike's part), each a mesh of its own (30 indices or 24, from another place).
+            if (rearHidden && !gateBox && getenv("MXCAM_TEST_BESIDE")) {
+                const float turn = 0.35f, c = std::cos(turn), n = std::sin(turn);
+                const float upright[16] = { c, 0, n, 0,  0, 1, 0, 0,  -n, 0, c, 0,  x0 - 0.9f * u, 0.0f, -4.5f * u + 1.1f * u, 1 };
+                const float block[16] = { c, n, 0, 0,  -n, c, 0, 0,  0, 0, 1, 0,  (backShadow ? -0.1f : 3.6f) * u, 0.0f, -4.5f * u - 1.2f * u, 1 };
+                const float part[16] = { c, n, 0, 0,  -n, c, 0, 0,  0, 0, 1, 0,  x0 + 2.3f * u, 0.0f, -4.5f * u + 1.1f * u, 1 };
+                const float* const places[3] = { upright, block, part };
+                gl.BindVertexArray(arrays[1]);
+                for (int k = 0; k < 3; ++k) {
+                    float beside[16];
+                    Mul(view, places[k], beside);
+                    gl.UniformMatrix4fv(oMv, 1, GL_FALSE, beside);
+                    p_glDrawElements(GL_TRIANGLES, k == 2 ? 24 : 30, GL_UNSIGNED_SHORT, reinterpret_cast<const void*>(static_cast<uintptr_t>(k) * 12));
+                }
+            }
             const bool bodyGone = wheelDrift && frameIndex >= 60 && frameIndex < 63;
             Mul(view, bikeModel, viewModel);
             if (!bodyGone)
@@ -1387,6 +1460,30 @@ int main(int argc, char** argv)
                 gl.UniformMatrix4fv(oMv, 1, GL_FALSE, blockView);
                 p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
             }
+            p_glDepthMask(GL_TRUE);
+        }
+        if (crowdScene) {
+            gl.UniformMatrix4fv(oProj, 1, GL_FALSE, projection);
+            gl.Uniform3fv(oLight, 1, sunEye);
+            const float shirt[3] = { 0.6f, 0.55f, 0.5f };
+            gl.Uniform3fv(oColor, 1, shirt);
+            gl.BindVertexArray(crowdArray);
+            p_glDepthMask(GL_FALSE);
+            for (int k = 0; k < kCrowd; ++k) {
+                if (mode != "crowd" && k % 300 == 0) {
+                    gl.BindBuffer(0x8892, crowdBuffers[0]);
+                    gl.BufferData(0x8892, static_cast<ptrdiff_t>(crowdVertices.size() * sizeof(float)), crowdVertices.data(), 0x88E0);
+                }
+                gl.UniformMatrix4fv(oMv, 1, GL_FALSE, view);  // (placed in the world: the bare view, set for each)
+                if (crowdTex) {
+                    p_glBindTexture(GL_TEXTURE_2D, crowdTextures[k % 3]);
+                    const float gone[3] = { -1.0f, 0.0f, 0.0f };
+                    gl.Uniform3fv(oColor, 1, k % 7 == 3 ? gone : shirt);
+                }
+                p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, reinterpret_cast<const void*>(static_cast<uintptr_t>(k) * 36 * 2));
+            }
+            if (crowdTex)
+                p_glBindTexture(GL_TEXTURE_2D, 0);
             p_glDepthMask(GL_TRUE);
         }
         if (mode == "treeghost" || mode == "treestream") {  // (a 1 m grey block on the dirt 5 m ahead, a little left, no depth written)
@@ -1754,7 +1851,7 @@ int main(int argc, char** argv)
         const Pixel flarePixel = At(flareX, 130), beside = At(flareX - 45, 130);
         const bool timeOfDay = mode == "night" || mode == "rainnight" || mode == "headlight" || mode == "narrowbeam" || mode == "thirdperson" ||
                                mode == "headlightup" || mode == "headlightdown" || mode == "headlightamber" ||
-                               mode == "headlightrainbow" || mode == "skyghost";
+                               mode == "headlightrainbow" || mode == "skyghost" || mode == "crowd" || mode == "crowdstream" || mode == "crowdtex" || mode == "crowdfar";
         printf("    lens flare %d %d %d, beside it %d %d %d\n", flarePixel.r, flarePixel.g, flarePixel.b, beside.r, beside.g, beside.b);
         if (timeOfDay)
             Check(Near(flarePixel, beside, 6), "the game's lens flare is hidden under a time of day of our own");
@@ -2144,6 +2241,8 @@ int main(int argc, char** argv)
                mode == "snowperf" ? "snow at 100%, snowfall 100%" : mode == "snowperf0" ? "snow off"
                : mode == "dirtperf" ? "dirt detail" : mode == "rainperf" ? "rain at 100%, puddles 80%"
                : mode == "treefogperf" ? "rain, 800 see-through draws"
+               : mode == "crowdperf" ? "dusk, a crowd of 1200 see-through draws (rewritten every 300)"
+               : mode == "crowdtexperf" ? "dusk, a crowd of 1200 see-through draws, a texture each (rewritten every 300)"
                : "dirt detail with Ultra graphics",
                timedMs / timedFrames, timedFrames);
     } else if (timing) {

@@ -127,6 +127,9 @@ struct Config {
     double shadowDistance   = 20.0;       // m (real metres: the game's unit is feet): shadow maps cover this far around the camera
     int    shadowResolution = 0;          // 0 = 2048, 1 = 4096, 2 = 8192 texels per side
     int    shadowMapSize    = 2048;       // texels per side (from shadowResolution)
+    bool   shadowBikes      = true;       // detailed shadows: bikes and riders cast them (yours and everyone's)
+    bool   shadowObjects    = true;       // detailed shadows: everything else solid casts them (track objects, trees, stands)
+    bool   shadowGround     = true;       // detailed shadows: the ground turned away from the sun is shaded (berm faces, slopes)
     double shadowSoftness   = 0.5;        // 0..1 detailed shadows' edges: 0 crisp, 1 soft (and the steps a
                                           // low sun leaves on a berm's face smoothed the most)
     bool   shadowBatch      = true;       // static objects' shadows drawn together (0: one at a time)
@@ -222,6 +225,10 @@ struct Config {
     double brakeSqueal      = 0.0;        // 0..1 the brake squeal's loudness (brake.cpp; 0 = off): OTHER, SOUND MODS
     bool   dabIndicator     = false;      // bottom right: red standing, green while the game's Sit/Dab key sits you (dab.cpp)
     bool   lapTimer         = false;
+    int    seeThroughDepth  = 1;          // [Debug] SeeThroughDepth=0: see-through draws (trees, the crowd) aren't drawn
+                                          // again for their own depth; 2: only those the game writes afresh every frame
+                                          // (the crowd, trees' billboards) aren't - only to compare frame rates; trees and
+                                          // decals may then look wrong (F9 reloads). 1: as always
     int    shadowView       = 0;          // [Debug] ShadowView: 0 off; 1 the detailed shadows' cascades tinted (red, green,
                                           // blue, yellow: sharpest to coarsest), the light on them; 2 only the ground turned
                                           // from the sun; 3 only the shadows things cast; 4 the light the two leave      // your laps timed from the track's own timing gates (laptimer.h); where: LapTimerPlace

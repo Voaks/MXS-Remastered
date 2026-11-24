@@ -45,6 +45,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <map>
 #include <new>
 #include <share.h>
 #include <string>
@@ -241,6 +242,14 @@ bool g_stadiumTrack = false;  // this track has drawn something far bigger than 
                               // (a stadium's roof or stands): things all overhead are left out too
 std::unordered_map<GLuint, BufferUpdates> g_bufferUpdates;          // buffers rewritten while running
 void BeforeVertexArrayChange();  // (see g_seeThroughPending)
+// What CachedBounds' quick answers rest on (see g_quickBounds): counted up whenever something one of
+// them was worked out from may have changed. Buffers: given contents while not yet rewritten every
+// frame (a buffer that is, is "streamed" for good and its draws aren't measured whatever it holds), or
+// deleted. Vertex arrays, each its own count: re-pointed, given another element buffer or another
+// buffer, or deleted - every bike's parts are re-pointed as they're drawn, and that leaves the
+// scenery's answers be.
+unsigned g_bufferEpoch = 0;
+std::unordered_map<GLuint, unsigned> g_vaoEpoch;
 
 struct DeferredCaster {
     GLuint   program = 0, vao = 0, elementBuffer = 0;
@@ -2067,8 +2076,10 @@ void APIENTRY Wrap_glBindBuffer(GLenum target, GLuint buffer)
         if (g_elementBuffers[g_vao] != buffer)
             BeforeVertexArrayChange();
         GLuint& was = g_elementBuffers[g_vao];
-        if (was != buffer)
+        if (was != buffer) {
             g_vaoChangedFrame[g_vao] = g_frameNumber;
+            ++g_vaoEpoch[g_vao];
+        }
         was = buffer;
     }
     else if (target == kArrayBufferTarget)
@@ -2583,6 +2594,8 @@ void NoteBufferUpdate(GLenum target)
     if (!buffer)
         return;
     BufferUpdates& u = g_bufferUpdates[buffer];
+    if (u.frames < 2)
+        ++g_bufferEpoch;  // (not streamed until now: what was measured from it, or whether it is, may change)
     if (u.lastFrame != g_frameNumber) {
         u.lastFrame = g_frameNumber;
         ++u.frames;
@@ -2649,12 +2662,66 @@ void DumpBufferUpload(const char* call, GLenum target, ptrdiff_t offset, ptrdiff
     DumpCall("%s buffer=%u offset=%td size=%td usage=0x%X [%s]", call, g_arrayBuffer, offset, size, usage, values);
 }
 
+// ---- What the game streams, as it gave it ------------------------------------------------------
+// A buffer the game writes afresh every frame (Streamed: a track's crowd, its trees' billboards) can't
+// be read back from the driver without waiting for it. What the game hands over is kept here instead,
+// as it hands it over (bytes it never gave - a buffer made empty, then filled in part - aren't known):
+// see-through draws of it are measured from this (FarAndShortSeeThrough).
+struct StreamCopy {
+    std::vector<unsigned char> bytes;
+    size_t known[2] = { 0, 0 };  // the bytes known to be as given: [known[0], known[1])
+};
+std::unordered_map<GLuint, StreamCopy> g_streamCopies;
+unsigned g_streamCopiesEpoch = 0;  // (counted up whenever one is let go: FarAndShortSeeThrough keeps pointers to them)
+GLuint TargetBuffer(GLenum target)
+{
+    if (target == kArrayBufferTarget)
+        return g_arrayBuffer;
+    if (target == kElementArrayBuffer) {
+        const auto found = g_elementBuffers.find(g_vao);
+        return found != g_elementBuffers.end() ? found->second : 0;
+    }
+    return 0;
+}
+bool Streamed(GLuint buffer);
+void KeepStreamCopy(GLenum target, ptrdiff_t offset, ptrdiff_t size, const void* data, bool whole)
+{
+    const GLuint buffer = TargetBuffer(target);
+    if (!buffer || size < 0 || offset < 0)
+        return;
+    if (!Streamed(buffer)) {
+        if (g_streamCopies.erase(buffer))  // (not rewritten every frame (yet): read back once when needed instead)
+            ++g_streamCopiesEpoch;
+        return;
+    }
+    const auto [entry, made] = g_streamCopies.try_emplace(buffer);
+    if (made)
+        ++g_streamCopiesEpoch;  // (a new one: FarAndShortSeeThrough looks again)
+    StreamCopy& copy = entry->second;
+    const size_t at = static_cast<size_t>(offset), n = static_cast<size_t>(size);
+    if (whole) {
+        copy.bytes.resize(n);
+        copy.known[0] = copy.known[1] = 0;
+    }
+    if (!data || at + n > copy.bytes.size() || n == 0)
+        return;
+    std::memcpy(copy.bytes.data() + at, data, n);
+    if (copy.known[0] == copy.known[1] || at > copy.known[1] || at + n < copy.known[0]) {
+        copy.known[0] = at;  // (not touching what was known: only this piece is)
+        copy.known[1] = at + n;
+    } else {
+        copy.known[0] = std::min(copy.known[0], at);
+        copy.known[1] = std::max(copy.known[1], at + n);
+    }
+}
+
 void APIENTRY Wrap_glBufferData(GLenum target, ptrdiff_t size, const void* data, GLenum usage)
 {
     DumpBufferUpload("glBufferData", target, 0, size, data, usage);
     NoteBufferUpdate(target);
     NoteBufferContents(target);
     BeforeBufferWrite(target);
+    KeepStreamCopy(target, 0, size, data, true);
     real_glBufferData(target, size, data, usage);
 }
 
@@ -2681,6 +2748,7 @@ void APIENTRY Wrap_glBufferSubData(GLenum target, ptrdiff_t offset, ptrdiff_t si
     NoteBufferUpdate(target);
     NoteBufferContents(target);
     BeforeBufferWrite(target);
+    KeepStreamCopy(target, offset, size, data, false);
     real_glBufferSubData(target, offset, size, data);
 }
 
@@ -2692,12 +2760,17 @@ void APIENTRY Wrap_glVertexAttribPointer(GLuint index, GLint size, GLenum type, 
                  index, size, type, normalized, stride, pointer, g_arrayBuffer, g_vao);
     if (g_vao) {
         std::vector<GLuint>& buffers = g_vaoArrayBuffers[g_vao];
-        if (std::find(buffers.begin(), buffers.end(), g_arrayBuffer) == buffers.end())
+        if (std::find(buffers.begin(), buffers.end(), g_arrayBuffer) == buffers.end()) {
             buffers.push_back(g_arrayBuffer);
+            ++g_vaoEpoch[g_vao];
+        }
         if (index < 16) {
             AttribPointer& a = g_vaoAttribs[static_cast<unsigned long long>(g_vao) << 4 | index];
             if (a.buffer != g_arrayBuffer || a.offset != reinterpret_cast<uintptr_t>(pointer) || a.stride != stride || a.size != size)
                 BeforeVertexArrayChange();
+            if (a.buffer != g_arrayBuffer || a.offset != reinterpret_cast<uintptr_t>(pointer) || a.stride != stride || a.size != size ||
+                a.type != type)
+                ++g_vaoEpoch[g_vao];
             if (a.buffer != g_arrayBuffer || a.offset != reinterpret_cast<uintptr_t>(pointer)) {
                 ++g_vaoGeneration[g_vao];
                 g_vaoChangedFrame[g_vao] = g_frameNumber;
@@ -2754,7 +2827,10 @@ void APIENTRY Wrap_glDeleteBuffers(GLsizei count, const GLuint* names)
     for (GLsizei n = 0; names && n < count; ++n) {
         ++g_bufferGeneration[names[n]];  // (its name may be given out again: what was read back from it is old)
         g_bufferUpdates.erase(names[n]);  // (and filled once more then: not something rewritten while running)
+        if (g_streamCopies.erase(names[n]))
+            ++g_streamCopiesEpoch;
     }
+    ++g_bufferEpoch;
     real_glDeleteBuffers(count, names);
 }
 
@@ -2763,6 +2839,7 @@ void APIENTRY Wrap_glDeleteVertexArrays(GLsizei count, const GLuint* names)
     DropKeptWheels(count, names, true);
     for (GLsizei n = 0; names && n < count; ++n) {
         ++g_vaoGeneration[names[n]];
+        ++g_vaoEpoch[names[n]];
         g_vaoArrayBuffers.erase(names[n]);
         for (unsigned index = 0; index < 16; ++index)
             g_vaoAttribs.erase(static_cast<unsigned long long>(names[n]) << 4 | index);
@@ -2856,7 +2933,8 @@ void StartTrace(double seconds)
                      "sh_replay_skinned_drawn/indices_changed/repointed/no_bones,sh_replay_rigid_drawn/indices_changed/repointed/no_bones,"
                      "sh_real_body_along,marks_repressed,marks_repress_waiting,marks_others_cached,marks_ms,marks_window_still,"
                      "gpu_shadow_flush_ms,gpu_effects_ms,cpu_shadow_flush_ms,cpu_effects_ms,cpu_cast_now_ms,cpu_wheel_watch_ms,"
-                     "sh_boxed_out/in,cpu_draw_hooks_ms,draws_hooked,sh_flush_kindices_c0/c1/c2/c3,draw_parts_ms_snapshots/checks/bones/wheels/shadow/dirt/wet,whip,game_step_ms,bike_rest,camera_rest,lean_along,lean_pitch_deg,lean_shift\n");
+                     "sh_boxed_out/in,cpu_draw_hooks_ms,draws_hooked,sh_flush_kindices_c0/c1/c2/c3,draw_parts_ms_snapshots/checks/bones/wheels/shadow/dirt/wet,"
+                     "see_redrawn,see_calls,see_flushes,cpu_see_redraw_ms,cpu_see_ready_ms,see_far_left_out,whip,game_step_ms,bike_rest,camera_rest,lean_along,lean_pitch_deg,lean_shift\n");
     // Times are relative to the key press: the history before it is negative.
     const double now = camera::ContentTime();
     g_traceFrames = 0;
@@ -3329,6 +3407,9 @@ bool MeasureDraw(const DrawCall& draw, DrawBounds& b)
 // Whether the draw about to be made is far bigger than anything on a track, or all of it well
 // overhead (see DrawBounds): it isn't cast.
 const DrawBounds* g_castBox = nullptr;  // the draw TooBigToCast just measured (null: none), for ShadowMatrices
+// And how far its box is from the camera at the nearest, as the sun sees it (game units; -1: not known):
+// CastShadow leaves out what's further than the shadow map reaches without working out where it lands.
+double g_castBoxAway = -1.0;
 
 // The current draw's bounds (DrawBounds), measured once per draw call and kept while its buffers'
 // contents are the same. Null for geometry the game rewrites while running (dust, streamed pieces):
@@ -3354,7 +3435,55 @@ DrawBounds* CachedBounds(const DrawCall& draw)
     asked = draw;
     return answer;
 }
+// The answers CachedBoundsSlow gave, by the draw call alone (one look-up, where it takes eight or so:
+// every draw the game makes comes through here, ~6000 a frame on a busy track, and nearly all of them
+// are the scenery's, the same draw calls from frame to frame). Each holds while nothing it was worked
+// out from has changed since: no buffer given contents that wasn't rewritten every frame already, none
+// deleted (g_bufferEpoch), and its vertex array as it was (g_vaoEpoch). (Tests: MXCAM_TEST_NO_QUICK_BOUNDS
+// - every answer worked out afresh, as before, to compare.)
+struct QuickBounds {
+    GLuint          program = 0, vao = 0;
+    DrawCall        draw;
+    unsigned        bufferEpoch = 0, vaoEpoch = 0;
+    const unsigned* vaoEpochAt = nullptr;  // (g_vaoEpoch's count for it: entries are never removed, so it stays put)
+    DrawBounds*     answer = nullptr;      // (g_drawBounds' entries are never removed either)
+};
+std::unordered_map<unsigned long long, QuickBounds> g_quickBounds;
+DrawBounds* CachedBoundsSlow(const DrawCall& draw);
 DrawBounds* CachedBoundsNow(const DrawCall& draw)
+{
+    static const bool off = GetEnvironmentVariableA("MXCAM_TEST_NO_QUICK_BOUNDS", nullptr, 0) > 0 ||
+                            GetEnvironmentVariableA("MXCAM_TEST_NO_DRAW_CACHE", nullptr, 0) > 0;
+    if (off)
+        return CachedBoundsSlow(draw);
+    unsigned long long key = 1469598103934665603ull;
+    const auto Mix = [&key](unsigned long long v) { key ^= v + 0x9E3779B97F4A7C15ull + (key << 6) + (key >> 2); };
+    Mix(g_program);
+    Mix(g_vao);
+    Mix(static_cast<unsigned long long>(draw.kind) << 32 | draw.mode);
+    Mix(static_cast<unsigned long long>(static_cast<unsigned>(draw.count)) << 32 | static_cast<unsigned>(draw.first));
+    Mix(reinterpret_cast<uintptr_t>(draw.indices));
+    Mix(draw.type);
+    QuickBounds& q = g_quickBounds[key];
+    const bool same = q.vaoEpochAt && q.program == g_program && q.vao == g_vao && q.draw.kind == draw.kind && q.draw.mode == draw.mode &&
+                      q.draw.count == draw.count && q.draw.first == draw.first && q.draw.indices == draw.indices &&
+                      q.draw.type == draw.type;
+    if (same && q.bufferEpoch == g_bufferEpoch && q.vaoEpoch == *q.vaoEpochAt)
+        return q.answer;
+    // (Worked out afresh. The counts as they are now, before: working it out reads buffers back on a
+    // binding of its own, which counts nothing.)
+    if (!same) {
+        q.program = g_program;
+        q.vao = g_vao;
+        q.draw = draw;
+        q.vaoEpochAt = &g_vaoEpoch[g_vao];
+    }
+    q.bufferEpoch = g_bufferEpoch;
+    q.vaoEpoch = *q.vaoEpochAt;
+    q.answer = CachedBoundsSlow(draw);
+    return q.answer;
+}
+DrawBounds* CachedBoundsSlow(const DrawCall& draw)
 {
     const auto element = g_elementBuffers.find(g_vao);
     if (element != g_elementBuffers.end() && element->second && Streamed(element->second))
@@ -3396,6 +3525,7 @@ DrawBounds* CachedBoundsNow(const DrawCall& draw)
 bool TooBigToCast(const DrawCall& draw, const GLfloat uploaded[16])
 {
     g_castBox = nullptr;
+    g_castBoxAway = -1.0;
     const SkinnedProgram* skin = FindSkinned(g_program);
     if (skin && skin->bones != 0)
         return false;  // (a rider: its bones place it)
@@ -3424,6 +3554,25 @@ bool TooBigToCast(const DrawCall& draw, const GLfloat uploaded[16])
     for (int r = 0; r < 3; ++r) {
         middle[r] = uploaded[r] * mid[0] + uploaded[4 + r] * mid[1] + uploaded[8 + r] * mid[2] + uploaded[12 + r];
         reach[r] = std::fabs(uploaded[r]) * half[0] + std::fabs(uploaded[4 + r]) * half[1] + std::fabs(uploaded[8 + r]) * half[2];
+    }
+    // (How far the box is from the camera at the nearest: in eye space, then in the world's units - the
+    // sun's view is the world's, turned. Only with a view that is turned and evenly scaled, as the
+    // game's is: otherwise not known.)
+    {
+        double s2[3], d2 = 0.0;
+        for (int c = 0; c < 3; ++c)
+            s2[c] = view[4 * c] * view[4 * c] + view[4 * c + 1] * view[4 * c + 1] + view[4 * c + 2] * view[4 * c + 2];
+        const double most = std::fmax(s2[0], std::fmax(s2[1], s2[2])), least = std::fmin(s2[0], std::fmin(s2[1], s2[2]));
+        const double d01 = view[0] * view[4] + view[1] * view[5] + view[2] * view[6];
+        const double d02 = view[0] * view[8] + view[1] * view[9] + view[2] * view[10];
+        const double d12 = view[4] * view[8] + view[5] * view[9] + view[6] * view[10];
+        if (least > 1e-12 && most < least * 1.002 && std::fabs(d01) + std::fabs(d02) + std::fabs(d12) < 1e-3 * least) {
+            for (int r = 0; r < 3; ++r) {
+                const double e = std::fmax(0.0, std::fabs(middle[r]) - reach[r]);
+                d2 += e * e;
+            }
+            g_castBoxAway = std::sqrt(d2 / most);
+        }
     }
     // Its lowest point above the camera: the middle's height, less how far the box reaches down.
     double lowest = middle[0] * upEye[0] + middle[1] * upEye[1] + middle[2] * upEye[2];
@@ -3564,6 +3713,119 @@ int HoldBackRealBody(const SkinnedProgram* skin, const DeferredCaster& drawn)
     return held;
 }
 
+bool InverseAffine(const double m[16], double out[16]);
+
+// Whether the rigid draw about to be made, within 6 m of a rider, is of a bike's mesh rather than a track's
+// object: by how its copies move. A bike's part travels with its rider; a tuff block stays where it is while
+// a rider comes up to it and goes by. Counted up for the mesh, over every copy of it near any rider: a copy
+// that moved on a little since the frame before (a bike's), one still at the same spot though the rider
+// nearest it has come or gone by over a metre (an object's). Learnt from 6 m out, before it could be taken
+// for a bike's part (3 m). Nothing counted yet (all standing still, at the gate): a bike's if it leans at all
+// - an object without a collision shape is placed exactly upright. (Leaning alone isn't enough: the game moves
+// the ones with a shape, tuff blocks among them, as bodies, and they settle leaning on the ground.)
+struct BesideMesh {
+    struct Copy {
+        double at[3] = {};   // its origin in the world
+        double first = 0.0;  // m to the nearest rider when it was first at this spot
+    };
+    GLuint   program = 0, vao = 0;
+    DrawCall draw;
+    unsigned vaoEpoch = 0;  // (its vertex array then: another track's is new)
+    unsigned frame = 0;     // the frame now is of
+    std::vector<Copy> now, last;
+    int      still = 0, moving = 0;
+    bool     leans = false;
+    unsigned told = 0;      // (F11's log: the frame it was listed in)
+};
+std::unordered_map<unsigned long long, BesideMesh> g_besideMeshes;
+
+bool BikeMesh(const DrawCall& draw, const GLfloat raw[16], double riderMetres)
+{
+    static unsigned frame = ~0u;
+    static bool haveView = false;
+    static double inv[16], up[3];
+    if (frame != g_frameNumber) {  // (the view as the game has it: what a camera mod does to it isn't movement)
+        frame = g_frameNumber;
+        double view[16], rendered[16];
+        haveView = postfx::FrameRawView(view) && InverseAffine(view, inv) && postfx::FrameRenderedView(rendered, up);
+    }
+    if (!haveView)
+        return true;  // (not known: as a bike's part)
+    unsigned long long key = 1469598103934665603ull;
+    const auto Mix = [&key](unsigned long long v) { key ^= v + 0x9E3779B97F4A7C15ull + (key << 6) + (key >> 2); };
+    Mix(g_program);
+    Mix(g_vao);
+    Mix(static_cast<unsigned long long>(draw.kind) << 32 | draw.mode);
+    Mix(static_cast<unsigned long long>(static_cast<unsigned>(draw.count)) << 32 | static_cast<unsigned>(draw.first));
+    Mix(reinterpret_cast<uintptr_t>(draw.indices));
+    if (g_besideMeshes.size() > 20000)
+        g_besideMeshes.clear();
+    BesideMesh& mesh = g_besideMeshes[key];
+    const unsigned vaoEpoch = g_vaoEpoch[g_vao];
+    if (mesh.program != g_program || mesh.vao != g_vao || mesh.draw.kind != draw.kind || mesh.draw.mode != draw.mode ||
+        mesh.draw.count != draw.count || mesh.draw.first != draw.first || mesh.draw.indices != draw.indices ||
+        mesh.vaoEpoch != vaoEpoch) {
+        mesh = BesideMesh{};
+        mesh.program = g_program;
+        mesh.vao = g_vao;
+        mesh.draw = draw;
+        mesh.vaoEpoch = vaoEpoch;
+    }
+    if (mesh.frame != g_frameNumber) {
+        if (mesh.frame + 1 == g_frameNumber)
+            std::swap(mesh.last, mesh.now);
+        else
+            mesh.last.clear();  // (not near a rider the frame before)
+        mesh.now.clear();
+        mesh.frame = g_frameNumber;
+    }
+    const double u = 3.2808;  // (game units: feet)
+    BesideMesh::Copy copy;
+    double axis[3], length2 = 0.0, along = 0.0;
+    for (int r = 0; r < 3; ++r) {
+        copy.at[r] = inv[r] * raw[12] + inv[4 + r] * raw[13] + inv[8 + r] * raw[14] + inv[12 + r];
+        axis[r] = inv[r] * raw[4] + inv[4 + r] * raw[5] + inv[8 + r] * raw[6];
+        length2 += axis[r] * axis[r];
+        along += axis[r] * up[r];
+    }
+    // (Off the vertical by more than 0.1 degrees; what rounding leaves an upright one is a hundredth of that.)
+    mesh.leans = mesh.leans || length2 - along * along > length2 * (0.0017 * 0.0017);
+    copy.first = riderMetres;
+    const BesideMesh::Copy* before = nullptr;
+    double nearest = (0.6 * u) * (0.6 * u);  // (further than that in a frame is another copy, or a reset)
+    for (const BesideMesh::Copy& c : mesh.last) {
+        double d2 = 0.0;
+        for (int r = 0; r < 3; ++r)
+            d2 += (c.at[r] - copy.at[r]) * (c.at[r] - copy.at[r]);
+        if (d2 < nearest) {
+            nearest = d2;
+            before = &c;
+        }
+    }
+    if (before && nearest < (0.02 * u) * (0.02 * u)) {
+        copy.first = before->first;
+        std::copy(before->at, before->at + 3, copy.at);  // (the spot it was first at: not crept away from)
+        if (std::fabs(riderMetres - copy.first) > 1.0)
+            ++mesh.still;
+    } else if (before) {
+        ++mesh.moving;
+    }
+    if (mesh.now.size() < 64)
+        mesh.now.push_back(copy);
+    if (mesh.still + mesh.moving > 4000) {  // (the latest counts most)
+        mesh.still /= 2;
+        mesh.moving /= 2;
+    }
+    const bool bike = mesh.still != mesh.moving ? mesh.moving > mesh.still : mesh.leans;
+    if (postfx::PicturesThisFrame() && mesh.told != g_frameNumber) {
+        mesh.told = g_frameNumber;
+        Log("trace: beside a rider: program %u, vertex array %u, %d indices, %.1f m from one: %s (moved on %d, stood still %d%s)",
+            g_program, g_vao, draw.count, riderMetres, bike ? "a bike's part" : "an object", mesh.moving, mesh.still,
+            mesh.leans ? ", leans" : "");
+    }
+    return bike;
+}
+
 void CastShadow(const DrawCall& draw)
 {
     const auto mv = g_programModelview.find(g_program);
@@ -3666,6 +3928,65 @@ void CastShadow(const DrawCall& draw)
 
     if (!postfx::WantsShadowCasters())
         return;  // (collected for the tire dirt's mask only)
+    // Bike & rider shadows / Object shadows (Config::shadowBikes, shadowObjects): which of them cast. A rider:
+    // drawn with bones. A bike's part (or a helmet): small - its box under 4 m across - within 3 m of a
+    // rider's hips (last frame's), and of a mesh that moves as a bike's does (BikeMesh).
+    // Everything else is an object: track objects, trees, stands.
+    const Config& shadowCfg = GetConfig();
+    if (!shadowCfg.shadowBikes || !shadowCfg.shadowObjects) {
+        const SkinnedProgram* skin = FindSkinned(g_program);
+        bool bikeOrRider = skin && skin->bones != 0;
+        if (!bikeOrRider) {
+            static unsigned hipsFrame = ~0u;
+            static float hips[64][3];
+            static int hipsCount = 0;
+            if (hipsFrame != g_frameNumber) {
+                hipsFrame = g_frameNumber;
+                hipsCount = postfx::LastRiderHipsEye(hips, 64);
+            }
+            const GLfloat* m = mv->second.uploaded;
+            float at[3] = { m[12], m[13], m[14] };  // (its origin; its box's middle if measured)
+            // (First by its origin alone - a bike's parts are placed at the bike: anything placed more than 6 m
+            // from every rider isn't one, and is let go without its box looked up. Most of a track goes here.)
+            bool nearARider = false;
+            const float roughly = 6.0f * 3.2808f;
+            for (int h = 0; h < hipsCount && !nearARider; ++h) {
+                const float dx = at[0] - hips[h][0], dy = at[1] - hips[h][1], dz = at[2] - hips[h][2];
+                nearARider = dx * dx + dy * dy + dz * dz < roughly * roughly;
+            }
+            bool small = nearARider;
+            const DrawBounds* b = nearARider ? CachedBounds(draw) : nullptr;
+            if (b && b->valid) {
+                double reach2 = 0.0;
+                for (int r = 0; r < 3; ++r) {
+                    double reach = 0.0, middle = m[12 + r];
+                    for (int k = 0; k < 3; ++k) {
+                        middle += m[4 * k + r] * 0.5 * (static_cast<double>(b->lo[k]) + b->hi[k]);
+                        reach += std::fabs(m[4 * k + r]) * 0.5 * (static_cast<double>(b->hi[k]) - b->lo[k]);
+                    }
+                    at[r] = static_cast<float>(middle);
+                    reach2 += reach * reach;
+                }
+                small = std::sqrt(reach2) < 2.0 * 3.2808;  // (half across: under 2 m)
+            }
+            if (small) {
+                float nearest2 = 1e12f;
+                for (int h = 0; h < hipsCount; ++h) {
+                    const float dx = at[0] - hips[h][0], dy = at[1] - hips[h][1], dz = at[2] - hips[h][2];
+                    nearest2 = std::min(nearest2, dx * dx + dy * dy + dz * dz);
+                }
+                const double metres = std::sqrt(static_cast<double>(nearest2)) / 3.2808;
+                const bool bike = BikeMesh(draw, mv->second.raw, metres);  // (asked out to 6 m: it learns there)
+                bikeOrRider = bike && metres < 3.0;
+            }
+        }
+        if (bikeOrRider ? !shadowCfg.shadowBikes : !shadowCfg.shadowObjects) {
+            postfx::NoteCast(3);
+            if (nearYou)
+                postfx::NoteNearCast(3);
+            return;
+        }
+    }
     if (TooBigToCast(draw, mv->second.uploaded)) {
         postfx::NoteCast(2);
         if (nearYou)
@@ -3683,6 +4004,19 @@ void CastShadow(const DrawCall& draw)
                 anchor[r] = m[r] * b[0] + m[4 + r] * b[1] + m[8 + r] * b[2] + m[12 + r];
             anchorEye = anchor;
         }
+    }
+    // Measured and wholly further from the camera than the shadow map reaches: nothing of it can land in
+    // any cascade, so it's left out here, without working out where it would (ShadowMatrices). Most of a
+    // track's scenery, every frame. (Tests: MXCAM_TEST_NO_FAR_SKIP - each worked out, as before.)
+    static const bool noFarSkip = GetEnvironmentVariableA("MXCAM_TEST_NO_FAR_SKIP", nullptr, 0) > 0;
+    double shadowReach = 0.0;
+    if (!noFarSkip && g_castBox && !anchorEye && g_castBoxAway >= 0.0 && postfx::ShadowReach(&shadowReach) &&
+        g_castBoxAway > shadowReach) {
+        postfx::NoteBoxedOut();
+        postfx::NoteCast(3);
+        if (nearYou)
+            postfx::NoteNearCast(3);
+        return;
     }
     float lightModelview[16];
     unsigned cascades = 0;
@@ -5231,6 +5565,7 @@ struct RiderTrack {
     bool     haveVelocity = false;
     double   velocity[3] = {};      // its move a frame
     bool     offBike = false;       // last seen 2 m and more from your bike
+    bool     onSeat = false;        // last seen sat on your bike
     unsigned seatFrames = 0, seatFrame = 0;
     double   seatWorld[3] = {};     // a rider sat on your bike (to take it up)
     unsigned shown = 0;             // frames your rider was given the dirt in (for the log)
@@ -5345,7 +5680,14 @@ bool OwnRiderDraw(const SkinnedProgram& skin, GLfloat leg[4], GLfloat arm[4])
         const double ahead = t.haveVelocity ? frames : 0.0;
         const double expected[3] = { t.world[0] + t.velocity[0] * ahead, t.world[1] + t.velocity[1] * ahead, t.world[2] + t.velocity[2] * ahead };
         const double reach = std::min(3.0, 0.3 + 0.1 * frames + (t.haveVelocity ? 0.0 : 0.32 * frames));
-        follows = Apart(world, expected) <= reach;
+        const double off = Apart(world, expected);
+        follows = off <= reach;
+        // (Not from your seat to a rider beside your bike in one jump: the one followed sat on your bike, this
+        // one doesn't, and it's further off than a rider moves in a frame - at the gate, the rider next to you,
+        // ~1 m over, came within reach after a few frames your rider wasn't seen, and the dirt went on to him
+        // for good. Your rider thrown off it moves on from where it was: followed, as always.)
+        if (follows && f.have && t.onSeat && !onSeat && off > 0.45)
+            follows = false;
     }
     // A rider sat on your bike: counted frame by frame (the same one: following itself).
     bool take = false;
@@ -5356,7 +5698,9 @@ bool OwnRiderDraw(const SkinnedProgram& skin, GLfloat leg[4], GLfloat arm[4])
             t.seatFrame = g_frameNumber;
             std::copy(world, world + 3, t.seatWorld);
         }
-        take = t.seatFrames >= kRiderTakeFrames && (!t.have || t.offBike);
+        // (Taken from one followed that's off your bike - or not sat on it: a rider beside yours, followed by
+        // mistake, kept it while yours sat there.)
+        take = t.seatFrames >= kRiderTakeFrames && (!t.have || t.offBike || !t.onSeat);
     }
     if (!firstPerson && !follows && !take)
         return false;
@@ -5377,6 +5721,7 @@ bool OwnRiderDraw(const SkinnedProgram& skin, GLfloat leg[4], GLfloat arm[4])
         t.frame = g_frameNumber;
         t.have = true;
         t.offBike = f.have && !nearBike;
+        t.onSeat = onSeat;
         if (++t.shown % 4096 == 1)
             Log("rider dirt: on your rider (%u frames)", t.shown);
     }
@@ -6074,7 +6419,8 @@ void FlushShadowCasters()
         const bool haveOwn = postfx::GetOwnAnchors(own);
         if (haveOwn) {
             UpdateRiddenParts(own);
-            CastRiderPieces(own);
+            if (GetConfig().shadowBikes)  // (Bike & rider shadows off: nothing of your rider cast)
+                CastRiderPieces(own);
         }
         DrawWheelMasks(haveOwn ? &own : nullptr);
     }
@@ -6402,6 +6748,245 @@ void FlushShadowCasters()
 // A see-through draw kept to be drawn again for its depth (FlushSeeThroughDepth). Not one with bones
 // (the riders' program draws the scenery too: its rigid draws are fine, as for the shadow map), nor
 // one whose buffers are rewritten as it goes (the game's dust): those keep the haze of what's behind.
+// A streamed see-through draw that's all of it short (under kShortSeeMetres tall: a spectator, a flagger -
+// trees stand taller) and not right beside you (all of it over kFarSeeMetres from the camera at its nearest:
+// a small see-through bush beside the track keeps its own depth, or it took the ground's look), measured from
+// what the game handed over for it (g_streamCopies; its indices from there too, or read back once if they
+// don't change). Anything not measurable: false. (Tests: MXCAM_TEST_NO_FAR_SEE - every one drawn again.)
+// (50 m at first: the crowd within it, drawn again in four goes a frame, still cost ~14 fps at a track's
+// stands - the user: "get rid of the depth treatment for all spectator crowd".)
+constexpr double kFarSeeMetres = 15.0, kShortSeeMetres = 3.0;
+// (F11: why the see-through draws asked about were drawn again or not, over the last whole frame - see
+// LogSeeThroughNeighbours. The heights in metres of the ones too tall: up to 6, up to 15, more.)
+enum SeeWhy { kSeeOff, kSeeNoCopy, kSeeNoIndices, kSeeOutside, kSeeNoView, kSeeNear, kSeeTall, kSeeLeftOut, kSeeWhys };
+struct SeeStats {
+    int why[kSeeWhys] = {}, remembered = 0, measured = 0, tall[3] = {};
+    long long indices = 0;  // (of the tall ones, in all)
+};
+SeeStats g_seeStats, g_seeStatsLast;
+unsigned g_seeStatsFrame = 0;
+void NoteSee(int why)
+{
+    if (g_seeStatsFrame != g_frameNumber) {
+        g_seeStatsLast = g_seeStats;
+        g_seeStats = SeeStats{};
+        g_seeStatsFrame = g_frameNumber;
+    }
+    ++g_seeStats.why[why];
+}
+bool FarAndShortSeeThrough(const DrawCall& draw, const GLfloat m[16])
+{
+    static const bool off = GetEnvironmentVariableA("MXCAM_TEST_NO_FAR_SEE", nullptr, 0) > 0;
+    if (off || draw.count <= 0 || draw.count > 65536)
+        return NoteSee(kSeeOff), false;
+    // (Asked for every see-through draw - a crowd's thousands a frame, all from the same program and
+    // vertex array: what's looked up for those is kept while they stay the same, and the view's once a
+    // frame. Looked up afresh for each, this cost about as much as it saved.)
+    struct Source {
+        GLuint program = 0, vao = 0;
+        unsigned vaoEpoch = 0, bufferEpoch = 0, copiesEpoch = 0;
+        const unsigned* vaoEpochAt = nullptr;
+        AttribPointer a;
+        const StreamCopy* vertices = nullptr;  // (null: not something streamed: not measured)
+        GLuint elements = 0;
+        const StreamCopy* elementCopy = nullptr;
+    };
+    static Source src;
+    if (!(src.vaoEpochAt && src.program == g_program && src.vao == g_vao && src.vaoEpoch == *src.vaoEpochAt &&
+          src.bufferEpoch == g_bufferEpoch && src.copiesEpoch == g_streamCopiesEpoch)) {
+        using PFN_GetAttribLocationFn = GLint(APIENTRY*)(GLuint program, const char* name);
+        static PFN_GetAttribLocationFn attribLocation =
+            reinterpret_cast<PFN_GetAttribLocationFn>(GetRealGLFunction("glGetAttribLocation"));
+        static std::unordered_map<GLuint, GLint> positionOf;  // program -> its vattr_position
+        auto position = positionOf.find(g_program);
+        if (position == positionOf.end()) {
+            const GLint location = attribLocation ? attribLocation(g_program, "vattr_position") : -1;
+            position = positionOf.emplace(g_program, location >= 0 ? location : 0).first;
+        }
+        src = Source{};
+        src.program = g_program;
+        src.vao = g_vao;
+        src.vaoEpochAt = &g_vaoEpoch[g_vao];
+        src.vaoEpoch = *src.vaoEpochAt;
+        src.bufferEpoch = g_bufferEpoch;
+        src.copiesEpoch = g_streamCopiesEpoch;
+        const auto pointer = g_vaoAttribs.find(static_cast<unsigned long long>(g_vao) << 4 | static_cast<unsigned>(position->second));
+        if (pointer != g_vaoAttribs.end() && pointer->second.buffer != 0 && pointer->second.type == GL_FLOAT && pointer->second.size >= 3) {
+            src.a = pointer->second;
+            const auto vertices = g_streamCopies.find(src.a.buffer);
+            src.vertices = vertices != g_streamCopies.end() ? &vertices->second : nullptr;
+        }
+        const auto element = g_elementBuffers.find(g_vao);
+        src.elements = element != g_elementBuffers.end() ? element->second : 0;
+        if (src.elements) {
+            const auto copy = g_streamCopies.find(src.elements);
+            src.elementCopy = copy != g_streamCopies.end() ? &copy->second : nullptr;
+        }
+    }
+    if (!src.vertices || src.vertices->known[0] == src.vertices->known[1])
+        return NoteSee(kSeeNoCopy), false;
+    const StreamCopy& v = *src.vertices;
+    const AttribPointer& a = src.a;
+    const size_t stride = a.stride > 0 ? static_cast<size_t>(a.stride) : static_cast<size_t>(a.size) * 4;
+    // Its indices (an indexed draw): what the game handed over, or read back once if they don't change.
+    const std::vector<unsigned char>* indices = nullptr;
+    size_t width = 0, start = 0;
+    if (draw.kind != DrawCall::Arrays) {
+        if (!src.elements)
+            return NoteSee(kSeeNoIndices), false;
+        size_t known[2] = { 0, 0 };
+        if (src.elementCopy) {
+            indices = &src.elementCopy->bytes;
+            known[0] = src.elementCopy->known[0];
+            known[1] = src.elementCopy->known[1];
+        } else if (!Streamed(src.elements)) {
+            indices = BufferContents(src.elements);  // (indices that don't change: read back once)
+            known[1] = indices ? indices->size() : 0;
+        }
+        if (!indices)
+            return NoteSee(kSeeNoIndices), false;
+        width = draw.type == GL_UNSIGNED_BYTE ? 1 : draw.type == GL_UNSIGNED_SHORT ? 2 : draw.type == GL_UNSIGNED_INT ? 4 : 0;
+        if (width == 0)
+            return false;
+        start = reinterpret_cast<uintptr_t>(draw.indices);
+        if (start < known[0] || start + static_cast<size_t>(draw.count) * width > known[1])
+            return NoteSee(kSeeNoIndices), false;
+    }
+    const auto IndexAt = [&](int i) -> size_t {
+        if (!indices)
+            return static_cast<size_t>(draw.first) + static_cast<size_t>(i);
+        const size_t at = start + static_cast<size_t>(i) * width;
+        if (width == 1)
+            return (*indices)[at];
+        if (width == 2)
+            return static_cast<size_t>((*indices)[at]) | static_cast<size_t>((*indices)[at + 1]) << 8;
+        unsigned index = 0;
+        std::memcpy(&index, indices->data() + at, 4);
+        return index;
+    };
+    const auto VertexAt = [&](size_t index, float p[3]) {
+        const size_t at = a.offset + index * stride;
+        if (at < v.known[0] || at + 12 > v.known[1])
+            return false;
+        std::memcpy(p, v.bytes.data() + at, 12);
+        return true;
+    };
+    float first[3];
+    if (!VertexAt(IndexAt(0), first))
+        return NoteSee(kSeeOutside), false;
+    // Its box in its own space: remembered from the last time this same draw call was measured, while its
+    // first vertex is still where it was (a crowd stands still: the game hands over the same people every
+    // frame) - measured again otherwise. (Each measured afresh, a crowd's thousands of small models cost
+    // ~0.6 ms a frame. Tests: MXCAM_TEST_NO_SEE_MEMO - every one measured afresh, as before.)
+    struct Remembered {
+        GLuint program = 0, vao = 0, buffer = 0, texture = 0;
+        DrawCall draw;
+        float first[3] = {}, lo[3] = {}, hi[3] = {};
+    };
+    static std::unordered_map<unsigned long long, Remembered> remembered;
+    static const bool noMemo = GetEnvironmentVariableA("MXCAM_TEST_NO_SEE_MEMO", nullptr, 0) > 0;
+    unsigned long long key = 1469598103934665603ull;
+    const auto Mix = [&key](unsigned long long x) { key ^= x + 0x9E3779B97F4A7C15ull + (key << 6) + (key >> 2); };
+    Mix(g_program);
+    Mix(g_vao);
+    Mix(a.buffer);
+    Mix(g_boundTextures[0]);
+    Mix(static_cast<unsigned long long>(draw.kind) << 32 | draw.mode);
+    Mix(static_cast<unsigned long long>(static_cast<unsigned>(draw.count)) << 32 | static_cast<unsigned>(draw.first));
+    Mix(reinterpret_cast<uintptr_t>(draw.indices));
+    float lo[3], hi[3];
+    const auto known = noMemo ? remembered.end() : remembered.find(key);
+    if (known != remembered.end() && known->second.program == g_program && known->second.vao == g_vao &&
+        known->second.buffer == a.buffer && known->second.texture == g_boundTextures[0] && known->second.draw.kind == draw.kind &&
+        known->second.draw.mode == draw.mode && known->second.draw.count == draw.count && known->second.draw.first == draw.first &&
+        known->second.draw.indices == draw.indices && std::memcmp(known->second.first, first, sizeof first) == 0) {
+        std::copy(known->second.lo, known->second.lo + 3, lo);
+        std::copy(known->second.hi, known->second.hi + 3, hi);
+        ++g_seeStats.remembered;
+    } else {
+        ++g_seeStats.measured;
+        std::copy(first, first + 3, lo);
+        std::copy(first, first + 3, hi);
+        for (int i = 1; i < draw.count; ++i) {
+            float p[3];
+            if (!VertexAt(IndexAt(i), p))
+                return NoteSee(kSeeOutside), false;
+            for (int k = 0; k < 3; ++k) {
+                lo[k] = std::fmin(lo[k], p[k]);
+                hi[k] = std::fmax(hi[k], p[k]);
+            }
+        }
+        if (!noMemo) {
+            if (remembered.size() > 50000)
+                remembered.clear();  // (kept to a few MB: a new track's draws, or one that keeps changing)
+            Remembered& r = remembered[key];
+            r.program = g_program;
+            r.vao = g_vao;
+            r.buffer = a.buffer;
+            r.texture = g_boundTextures[0];
+            r.draw = draw;
+            std::copy(first, first + 3, r.first);
+            std::copy(lo, lo + 3, r.lo);
+            std::copy(hi, hi + 3, r.hi);
+        }
+    }
+    // Its box in eye space (as TooBigToCast), then how far off at its nearest and how tall along the
+    // world's up - in the world's units: only with a view turned and evenly scaled, as the game's is.
+    // (The view's part once a frame.)
+    struct ViewPart {
+        unsigned frame = ~0u;
+        bool ok = false;
+        double scale = 1.0, upEye[3] = {};
+    };
+    static ViewPart view;
+    if (view.frame != g_frameNumber) {
+        view = ViewPart{};
+        view.frame = g_frameNumber;
+        double rendered[16], up[3];
+        if (postfx::FrameRenderedView(rendered, up)) {
+            double s2[3];
+            for (int c = 0; c < 3; ++c)
+                s2[c] = rendered[4 * c] * rendered[4 * c] + rendered[4 * c + 1] * rendered[4 * c + 1] + rendered[4 * c + 2] * rendered[4 * c + 2];
+            const double most = std::fmax(s2[0], std::fmax(s2[1], s2[2])), least = std::fmin(s2[0], std::fmin(s2[1], s2[2]));
+            if (least > 1e-12 && most < least * 1.002) {
+                view.ok = true;
+                view.scale = std::sqrt(most);
+                for (int r = 0; r < 3; ++r)
+                    view.upEye[r] = rendered[r] * up[0] + rendered[4 + r] * up[1] + rendered[8 + r] * up[2];
+            }
+        }
+    }
+    if (!view.ok)
+        return NoteSee(kSeeNoView), false;
+    double d2 = 0.0, tall = 0.0;
+    for (int r = 0; r < 3; ++r) {
+        double middle = m[12 + r], reach = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            const double mid = 0.5 * (static_cast<double>(lo[k]) + hi[k]), half = 0.5 * (static_cast<double>(hi[k]) - lo[k]);
+            middle += m[4 * k + r] * mid;
+            reach += std::fabs(m[4 * k + r]) * half;
+        }
+        const double e = std::fmax(0.0, std::fabs(middle) - reach);
+        d2 += e * e;
+    }
+    for (int k = 0; k < 3; ++k) {
+        const double half = 0.5 * (static_cast<double>(hi[k]) - lo[k]);
+        tall += 2.0 * std::fabs(m[4 * k] * view.upEye[0] + m[4 * k + 1] * view.upEye[1] + m[4 * k + 2] * view.upEye[2]) * half;
+    }
+    const double u = 3.2808;  // (game units: feet)
+    const double away = kFarSeeMetres * u * view.scale, shortest = kShortSeeMetres * u * view.scale;
+    if (tall >= shortest) {
+        NoteSee(kSeeTall);
+        const double metres = tall / (u * view.scale);
+        ++g_seeStats.tall[metres < 6.0 ? 0 : metres < 15.0 ? 1 : 2];
+        g_seeStats.indices += draw.count;
+        return false;
+    }
+    if (d2 <= away * away)
+        return NoteSee(kSeeNear), false;
+    return NoteSee(kSeeLeftOut), true;
+}
+
 void KeepSeeThrough(const DrawCall& draw)
 {
     if (g_seeThroughDraws.size() >= 4096) {
@@ -6416,6 +7001,18 @@ void KeepSeeThrough(const DrawCall& draw)
                  mv->second.kind != ModelviewKind::Scene ? "not a scene one" : "no location");
         return;
     }
+    // Something small the game streams, not right beside you (a track's crowd: thousands of draws a frame,
+    // each person a picture of its own, ~2 ms a frame drawn again): not drawn again. Its own depth only
+    // tells it from the ground behind it; without it, it's taken for the ground's own look, as a decal
+    // lying there is. Trees stand taller, and are drawn again (see FarAndShortSeeThrough).
+    // (First, before anything else is looked up for it: most of a crowd goes here.)
+    const SkinnedProgram* skin = FindSkinned(g_program);
+    const bool bones = skin && skin->positionLoc >= 0 && skin->bones != 0;
+    if (!bones && GetConfig().seeThroughDepth != 2 && FarAndShortSeeThrough(draw, mv->second.uploaded)) {
+        DumpCall("v (the next draw) see-through: NOT kept for its own depth (small and far off)");
+        postfx::NoteSeeThroughFar();
+        return;
+    }
     const auto projection = g_programProjection.find(g_program);
     if (projection == g_programProjection.end() || projection->second.location < 0) {
         DumpCall("v (the next draw) see-through: NOT kept for its own depth (no projection of its program's own)");
@@ -6423,13 +7020,16 @@ void KeepSeeThrough(const DrawCall& draw)
     }
     // Geometry the game writes afresh as it draws (a track's decals, its trees' billboards, dust) too:
     // drawn for its depth before its buffers are written again (BeforeBufferWrite). Not with bones.
-    const SkinnedProgram* skin = FindSkinned(g_program);
-    const bool bones = skin && skin->positionLoc >= 0 && skin->bones != 0;
     const bool streamed = !bones && !StaticBuffers(draw);
     // (A vertex array lately changed is fine for these: they're drawn before it's changed again.)
     if (bones || (!streamed && !VertexArraySteady()) || g_vao == 0 || g_activeUnit < 0 || g_activeUnit >= 16) {
         DumpCall("v (the next draw) see-through: NOT kept for its own depth (%s)", bones ? "drawn with bones" : "its vertex array changed lately");
         ++g_seeThroughSkipped;
+        return;
+    }
+    if (streamed && GetConfig().seeThroughDepth == 2) {  // ([Debug] SeeThroughDepth=2: to compare frame rates)
+        DumpCall("v (the next draw) see-through: NOT kept for its own depth (written afresh: SeeThroughDepth=2)");
+        postfx::NoteSeeThroughFar();
         return;
     }
     if (streamed) {
@@ -6457,6 +7057,108 @@ void KeepSeeThrough(const DrawCall& draw)
 // at once (before the shadow map's casters: their uniforms' copies are let go there). As the game
 // drew them: their program, arrays, textures, constant attributes, uniforms and matrices; the game's
 // put back after.
+// (F11, see FlushSeeThroughDepth: what each held-back see-through draw differs from the one before it
+// by, counted over this go - and which of their uniforms, by name.)
+void LogSeeThroughNeighbours()
+{
+    const size_t total = g_seeThroughDraws.size();
+    if (total < 2)
+        return;
+    enum { kProgram, kVao, kIndices, kTextures, kAttribs, kUniforms, kMoved, kTurned, kProjection, kKind, kSame, kKinds };
+    int count[kKinds] = {};
+    std::map<std::pair<GLuint, GLint>, int> uniforms;  // (program, location) -> times it differed
+    for (size_t k = 1; k < total; ++k) {
+        const SeeThroughDraw &a = g_seeThroughDraws[k - 1], &b = g_seeThroughDraws[k];
+        const DeferredCaster &x = a.c, &y = b.c;
+        if (x.program != y.program) {
+            ++count[kProgram];
+            continue;
+        }
+        bool same = true;
+        const auto Note = [&](bool differs, int kind) {
+            if (differs) {
+                ++count[kind];
+                same = false;
+            }
+        };
+        Note(x.vao != y.vao, kVao);
+        Note(x.elementBuffer != y.elementBuffer, kIndices);
+        Note(!std::equal(x.textures, x.textures + kTrackedUnits, y.textures), kTextures);
+        bool attribs = x.attribSet != y.attribSet;
+        for (int i = 0; i < kConstAttribs && !attribs; ++i)
+            attribs = (x.attribSet & (1u << i)) && !std::equal(x.attrib[i], x.attrib[i] + 4, y.attrib[i]);
+        Note(attribs, kAttribs);
+        bool uniformsDiffer = false;
+        if (x.uniforms != y.uniforms && x.uniforms >= 0 && y.uniforms >= 0 && x.uniforms < static_cast<int>(g_uniformSnaps.size()) &&
+            y.uniforms < static_cast<int>(g_uniformSnaps.size())) {
+            const auto& sa = g_uniformSnaps[static_cast<size_t>(x.uniforms)].slots;
+            const auto& sb = g_uniformSnaps[static_cast<size_t>(y.uniforms)].slots;
+            for (const auto& [location, slot] : sb) {
+                if (location == y.modelviewLoc || location == y.projectionLoc)
+                    continue;
+                const auto at = std::find_if(sa.begin(), sa.end(), [&](const auto& e) { return e.first == location; });
+                if (at == sa.end() || !(at->second == slot)) {
+                    uniformsDiffer = true;
+                    ++uniforms[{ y.program, location }];
+                }
+            }
+        } else if (x.uniforms != y.uniforms) {
+            uniformsDiffer = true;
+        }
+        Note(uniformsDiffer, kUniforms);
+        if (std::memcmp(a.modelview, b.modelview, sizeof a.modelview) != 0) {
+            const bool turned = std::memcmp(a.modelview, b.modelview, 12 * sizeof(GLfloat)) != 0;
+            Note(true, turned ? kTurned : kMoved);
+        }
+        Note(std::memcmp(a.projection, b.projection, sizeof a.projection) != 0, kProjection);
+        Note(x.draw.kind != y.draw.kind || x.draw.mode != y.draw.mode || x.draw.type != y.draw.type, kKind);
+        if (same)
+            ++count[kSame];
+    }
+    Log("postfx: F11 see-through re-draw, %zu draws (program %u first): next to the one before, another program %d, vertex "
+        "array %d, index buffer %d, textures %d, constant attributes %d, uniforms %d, modelview moved only %d, modelview "
+        "turned/scaled %d, projection %d, kind of draw %d; everything the same %d",
+        total, g_seeThroughDraws[0].c.program, count[kProgram], count[kVao], count[kIndices], count[kTextures], count[kAttribs],
+        count[kUniforms], count[kMoved], count[kTurned], count[kProjection], count[kKind], count[kSame]);
+    {
+        const SeeStats& w = g_seeStatsLast;
+        Log("postfx: F11 see-through, the last whole frame: left out (small, not right beside you) %d; drawn again: right beside "
+            "you %d, too tall %d (to 6 m %d, to 15 m %d, taller %d; %lld indices in all), not measurable %d (not streamed or "
+            "nothing handed over %d, its indices %d, outside what was handed over %d, the view %d, too many indices %d); sizes "
+            "remembered %d, measured %d",
+            w.why[kSeeLeftOut], w.why[kSeeNear], w.why[kSeeTall], w.tall[0], w.tall[1], w.tall[2], w.indices,
+            w.why[kSeeNoCopy] + w.why[kSeeNoIndices] + w.why[kSeeOutside] + w.why[kSeeNoView] + w.why[kSeeOff], w.why[kSeeNoCopy],
+            w.why[kSeeNoIndices], w.why[kSeeOutside], w.why[kSeeNoView], w.why[kSeeOff], w.remembered, w.measured);
+    }
+    // The uniforms that differed, by name (asked of GL: only in an F11 frame).
+    using PFN_GetActiveUniform = void(APIENTRY*)(GLuint, GLuint, GLsizei, GLsizei*, GLint*, GLenum*, char*);
+    using PFN_GetProgramiv = void(APIENTRY*)(GLuint, GLenum, GLint*);
+    static PFN_GetActiveUniform active = reinterpret_cast<PFN_GetActiveUniform>(GetRealGLFunction("glGetActiveUniform"));
+    static PFN_GetProgramiv programiv = reinterpret_cast<PFN_GetProgramiv>(GetRealGLFunction("glGetProgramiv"));
+    int listed = 0;
+    for (const auto& [key, times] : uniforms) {
+        if (listed++ >= 8)
+            break;
+        char name[96] = "?";
+        if (active && programiv && real_glGetUniformLocation) {
+            GLint n = 0;
+            programiv(key.first, 0x8B86 /* GL_ACTIVE_UNIFORMS */, &n);
+            for (GLint u = 0; u < n; ++u) {
+                char found[96] = {};
+                GLsizei length = 0;
+                GLint size = 0;
+                GLenum type = 0;
+                active(key.first, static_cast<GLuint>(u), sizeof found, &length, &size, &type, found);
+                if (real_glGetUniformLocation(key.first, found) == key.second) {
+                    std::memcpy(name, found, sizeof name);
+                    break;
+                }
+            }
+        }
+        Log("postfx:   uniform '%s' (program %u, location %d) differed %d times", name, key.first, key.second, times);
+    }
+}
+
 void FlushSeeThroughDepth()
 {
     g_seeThroughPending.clear();
@@ -6465,6 +7167,14 @@ void FlushSeeThroughDepth()
     g_seeThroughSkipped = 0;
     if (g_seeThroughDraws.empty())
         return;
+    // (For the trace: each go timed, and its draws counted - see_redrawn, see_flushes, cpu_see_redraw_ms.)
+    struct Timed {
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        int draws = 0, calls = 0;
+        double beginMs = 0;  // (of which getting ready: asking GL the state it puts back after - waits for the driver)
+        ~Timed() { postfx::NoteSeeThroughFlush(draws, calls, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), beginMs); }
+    } timed;
+    timed.draws = static_cast<int>(g_seeThroughDraws.size());
     const PFN_UniformMatrix4fv upload = real_glUniformMatrix4fv ? real_glUniformMatrix4fv : real_glUniformMatrix4fvARB;
     static PFN_BindTexture bindTexture = nullptr;
     if (!bindTexture)
@@ -6473,8 +7183,10 @@ void FlushSeeThroughDepth()
         real_glDrawElements = reinterpret_cast<PFN_DrawElements>(GetRealGLFunction("glDrawElements"));
     if (!real_glDrawArrays)
         real_glDrawArrays = reinterpret_cast<PFN_DrawArrays>(GetRealGLFunction("glDrawArrays"));
-    if (!upload || !real_glUseProgram || !real_glBindVertexArray || !real_glActiveTexture || !bindTexture ||
-        !postfx::BeginSeeThroughDepth()) {
+    const bool ready = upload && real_glUseProgram && real_glBindVertexArray && real_glActiveTexture && bindTexture &&
+                       postfx::BeginSeeThroughDepth();
+    timed.beginMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - timed.start).count();
+    if (!ready) {
         static bool logged = false;
         if (!logged) {
             logged = true;
@@ -6506,12 +7218,64 @@ void FlushSeeThroughDepth()
     };
     GLfloat attribNow[kConstAttribs][4];
     std::copy(&g_constAttrib[0][0], &g_constAttrib[0][0] + kConstAttribs * 4, &attribNow[0][0]);
-    int drawn = 0;
-    for (const SeeThroughDraw& s : g_seeThroughDraws) {
+    int drawn = 0, calls = 0;
+    // Draws in a row with everything the same - program, vertex array, indices, textures, uniforms,
+    // constant attributes, matrices, the kind of draw - only their ranges differing (a crowd: thousands
+    // a frame, each person or a few at a time from the same buffer): drawn in one call (glMultiDraw*),
+    // which draws exactly what they do one after another. One call each, ~3400 of them a frame by a
+    // crowd, cost ~2 ms. (Tests: MXCAM_TEST_NO_SEE_MERGE - one call each, as before.)
+    using PFN_MultiDrawElements = void(APIENTRY*)(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices, GLsizei drawcount);
+    using PFN_MultiDrawArrays = void(APIENTRY*)(GLenum mode, const GLint* first, const GLsizei* count, GLsizei drawcount);
+    static const bool noMerge = GetEnvironmentVariableA("MXCAM_TEST_NO_SEE_MERGE", nullptr, 0) > 0;
+    static PFN_MultiDrawElements multiElements = nullptr;
+    static PFN_MultiDrawArrays multiArrays = nullptr;
+    static bool lookedMulti = false;
+    if (!lookedMulti) {
+        lookedMulti = true;
+        multiElements = reinterpret_cast<PFN_MultiDrawElements>(GetRealGLFunction("glMultiDrawElements"));
+        multiArrays = reinterpret_cast<PFN_MultiDrawArrays>(GetRealGLFunction("glMultiDrawArrays"));
+    }
+    const auto SameState = [](const SeeThroughDraw& a, const SeeThroughDraw& b) {
+        const DeferredCaster &x = a.c, &y = b.c;
+        const bool xArrays = x.draw.kind == DrawCall::Arrays, yArrays = y.draw.kind == DrawCall::Arrays;
+        if (x.program != y.program || x.vao != y.vao || x.elementBuffer != y.elementBuffer || x.uniforms != y.uniforms ||
+            x.modelviewLoc != y.modelviewLoc || x.projectionLoc != y.projectionLoc || x.boneCountLoc != y.boneCountLoc ||
+            x.attribSet != y.attribSet || xArrays != yArrays || x.draw.mode != y.draw.mode || (!xArrays && x.draw.type != y.draw.type))
+            return false;
+        if (!std::equal(x.textures, x.textures + kTrackedUnits, y.textures))
+            return false;
+        for (int k = 0; k < kConstAttribs; ++k)
+            if ((x.attribSet & (1u << k)) && !std::equal(x.attrib[k], x.attrib[k] + 4, y.attrib[k]))
+                return false;
+        return std::memcmp(a.modelview, b.modelview, sizeof a.modelview) == 0 &&
+               std::memcmp(a.projection, b.projection, sizeof a.projection) == 0;
+    };
+    // (F11: what the draws in a row differ by, in the log - what keeps them from being merged.)
+    static const bool testLook = GetEnvironmentVariableA("MXCAM_TEST_SEE_LOOK", nullptr, 0) > 0;
+    if (postfx::PicturesThisFrame() || testLook)
+        LogSeeThroughNeighbours();
+    static std::vector<GLsizei> runCounts;
+    static std::vector<const void*> runIndices;
+    static std::vector<GLint> runFirsts;
+    // (What's already set, so it isn't sent again for every draw: a crowd's draws differ only by their
+    // texture - each person a picture of its own - and everything else re-sent ~3400 times a frame cost
+    // the driver as much again. What's sent is still exactly what each draw had.)
+    GLint activeNow = -1;                    // the texture unit made active last (-1: not yet)
+    GLuint snapProgram = 0;                  // the program whose uniforms were last brought to snapshot snapIndex
+    int snapIndex = -1;
+    GLuint matrixProgram = 0;                // the program the matrices below were last uploaded to
+    GLint matrixAt[2] = { -1, -1 };
+    GLfloat matrixNow[2][16];
+    std::vector<GLuint> countZeroed;         // programs whose bone count was set to none already
+    const size_t total = g_seeThroughDraws.size();
+    for (size_t i = 0; i < total;) {
+        const SeeThroughDraw& s = g_seeThroughDraws[i];
         const DeferredCaster& c = s.c;
         const auto element = g_elementBuffers.find(c.vao);
-        if (c.draw.kind != DrawCall::Arrays && (element == g_elementBuffers.end() || element->second != c.elementBuffer))
+        if (c.draw.kind != DrawCall::Arrays && (element == g_elementBuffers.end() || element->second != c.elementBuffer)) {
+            ++i;
             continue;  // (its vertex array given other indices since)
+        }
         if (c.program != program) {
             real_glUseProgram(c.program);
             program = c.program;
@@ -6524,13 +7288,19 @@ void FlushSeeThroughDepth()
         }
         for (int u = 0; u < kTrackedUnits; ++u) {  // (a shader that throws away its leaves' clear texels by them)
             if (bound[u] != c.textures[u]) {
-                real_glActiveTexture(kTexture0Unit + u);
+                if (activeNow != u) {
+                    real_glActiveTexture(kTexture0Unit + u);
+                    activeNow = u;
+                }
                 bindTexture(GL_TEXTURE_2D, c.textures[u]);
                 bound[u] = c.textures[u];
             }
         }
         if (c.uniforms >= 0 && c.uniforms < static_cast<int>(g_uniformSnaps.size()) &&
-            g_uniformSnaps[static_cast<size_t>(c.uniforms)].program == c.program) {
+            g_uniformSnaps[static_cast<size_t>(c.uniforms)].program == c.program &&
+            !(snapProgram == c.program && snapIndex == c.uniforms)) {
+            snapProgram = c.program;
+            snapIndex = c.uniforms;
             auto at = uniformsNow.find(c.program);
             if (at == uniformsNow.end())
                 at = uniformsNow.emplace(c.program, g_programUniforms[c.program].now).first;
@@ -6547,12 +7317,23 @@ void FlushSeeThroughDepth()
                 now[static_cast<size_t>(location)] = slot;
             }
         }
-        upload(c.modelviewLoc, 1, GL_FALSE, s.modelview);
-        upload(c.projectionLoc, 1, GL_FALSE, s.projection);
-        if (c.boneCountLoc >= 0 && real_glUniform1i) {
+        if (matrixProgram != c.program || matrixAt[0] != c.modelviewLoc || matrixAt[1] != c.projectionLoc ||
+            std::memcmp(matrixNow[0], s.modelview, sizeof s.modelview) != 0 ||
+            std::memcmp(matrixNow[1], s.projection, sizeof s.projection) != 0) {
+            upload(c.modelviewLoc, 1, GL_FALSE, s.modelview);
+            upload(c.projectionLoc, 1, GL_FALSE, s.projection);
+            matrixProgram = c.program;
+            matrixAt[0] = c.modelviewLoc;
+            matrixAt[1] = c.projectionLoc;
+            std::copy(s.modelview, s.modelview + 16, matrixNow[0]);
+            std::copy(s.projection, s.projection + 16, matrixNow[1]);
+        }
+        if (c.boneCountLoc >= 0 && real_glUniform1i &&
+            std::find(countZeroed.begin(), countZeroed.end(), c.program) == countZeroed.end()) {
             // A rigid draw of the riders' program (the scenery's): no bones counted and one at the origin,
             // as the game draws it (the program may hold a rider's by now) - as for the shadow map.
             real_glUniform1i(c.boneCountLoc, 0);
+            countZeroed.push_back(c.program);
             if (std::find(rigid.begin(), rigid.end(), c.program) == rigid.end()) {
                 if (const SkinnedProgram* own = FindSkinned(c.program)) {
                     static const GLfloat kZero[3] = { 0, 0, 0 }, kIdentity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
@@ -6576,9 +7357,36 @@ void FlushSeeThroughDepth()
                 }
             }
         }
-        Replay(c.draw);
-        ++drawn;
+        // (The ones after it in the row share its vertex array and indices: still good if it is.)
+        size_t j = i + 1;
+        const bool arrays = c.draw.kind == DrawCall::Arrays;
+        if (!noMerge && (arrays ? multiArrays != nullptr : multiElements != nullptr))
+            while (j < total && SameState(s, g_seeThroughDraws[j]))
+                ++j;
+        if (j - i == 1) {
+            Replay(c.draw);
+        } else if (arrays) {
+            runFirsts.clear();
+            runCounts.clear();
+            for (size_t k = i; k < j; ++k) {
+                runFirsts.push_back(g_seeThroughDraws[k].c.draw.first);
+                runCounts.push_back(g_seeThroughDraws[k].c.draw.count);
+            }
+            multiArrays(c.draw.mode, runFirsts.data(), runCounts.data(), static_cast<GLsizei>(j - i));
+        } else {
+            runIndices.clear();
+            runCounts.clear();
+            for (size_t k = i; k < j; ++k) {
+                runIndices.push_back(g_seeThroughDraws[k].c.draw.indices);
+                runCounts.push_back(g_seeThroughDraws[k].c.draw.count);
+            }
+            multiElements(c.draw.mode, runCounts.data(), c.draw.type, runIndices.data(), static_cast<GLsizei>(j - i));
+        }
+        drawn += static_cast<int>(j - i);
+        ++calls;
+        i = j;
     }
+    timed.calls = calls;
     // Back as the game left it.
     if (real_glVertexAttrib4f) {
         for (int k = 0; k < kConstAttribs; ++k) {
@@ -6635,31 +7443,39 @@ void FlushSeeThroughDepth()
     static int logged = 0;
     if (logged < 3) {
         ++logged;
-        Log("postfx: %d see-through draws drawn again for their depth (%d couldn't be: their buffers rewritten as they go)",
-            drawn, skipped);
+        Log("postfx: %d see-through draws drawn again for their depth in %d calls (%d couldn't be: their buffers rewritten as they go)",
+            drawn, calls, skipped);
     }
     g_seeThroughDraws.clear();
 }
 
-bool NoteDrawInner(const DrawCall& draw);
+bool NoteDrawInner(const DrawCall& draw, bool timed);
 bool NoteDraw(const DrawCall& draw)
 {
     ++g_drawSerial;
-    // (For the trace: all the mod's own work around the game's draws, timed.)
-    const auto start = std::chrono::steady_clock::now();
+    // (For the trace: all the mod's own work around the game's draws - timed on every 8th draw, counted
+    // 8 times over, as its parts are. Two clock readings around every draw cost ~35 ns: ~0.3 ms a frame
+    // by themselves at a busy track's 8000 draws.)
+    static unsigned sampled = 0;
+    const bool timed = (++sampled & 7) == 0;
     const bool terrain = g_terrain.isTerrain;
-    const bool drawIt = NoteDrawInner(draw);
+    if (!timed) {
+        const bool drawIt = NoteDrawInner(draw, false);
+        if (!terrain)
+            postfx::NoteDrawHooks(0.0);  // (counted)
+        return drawIt;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool drawIt = NoteDrawInner(draw, true);
     if (!terrain)
-        postfx::NoteDrawHooks(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        postfx::NoteDrawHooks(8.0 * std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
     return drawIt;
 }
 
-bool NoteDrawInner(const DrawCall& draw)
+bool NoteDrawInner(const DrawCall& draw, bool timed)
 {
     // (For the trace: every 8th draw's own parts timed - snapshots, checks, bones, wheels, shadow,
     // dirt, wet - each counted 8 times over; see postfx::NoteDrawParts.)
-    static unsigned sampled = 0;
-    const bool timed = (++sampled & 7) == 0;
     LARGE_INTEGER partAt = {};
     if (timed)
         QueryPerformanceCounter(&partAt);
@@ -6745,9 +7561,15 @@ bool NoteDrawInner(const DrawCall& draw)
         }
         Part(3);
         if (postfx::WantsShadowCasters() || postfx::WantsWheelMask()) {
-            const auto castStart = std::chrono::steady_clock::now();
-            CastShadow(draw);
-            postfx::NoteCastNowMs(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - castStart).count());
+            // (For the trace: timed on every 8th draw, counted 8 times over, as the parts are. Two clock
+            // readings around every draw cost ~35 ns - ~0.2 ms a frame on a busy track by themselves.)
+            if (timed) {
+                const auto castStart = std::chrono::steady_clock::now();
+                CastShadow(draw);
+                postfx::NoteCastNowMs(8.0 * std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - castStart).count());
+            } else {
+                CastShadow(draw);
+            }
         }
         Part(4);
         PaintBikeDirt(draw, PaintTireDirt(draw));

@@ -1530,6 +1530,14 @@ const RowDef kRows[] = {
     Slider(kTabGraphics, nullptr,           "Shadow distance",      &Config::shadowDistance,   5.0,   200.0, 1.0,    1.0,    0, " m")
         .Help("Detailed shadows: how far around you they reach. Shadows near you stay sharp at any "
               "distance; the far ones get softer the further it goes. Further costs some speed."),
+    Toggle(kTabGraphics, nullptr,           "Bike & rider shadows", &Config::shadowBikes)
+        .Help("Detailed shadows: bikes and riders cast them - yours and everyone else's."),
+    Toggle(kTabGraphics, nullptr,           "Object shadows",       &Config::shadowObjects)
+        .Help("Detailed shadows: everything else solid casts them - track objects like tuff blocks, trees, "
+              "stands, fences. The biggest cost of detailed shadows on busy tracks: off is faster."),
+    Toggle(kTabGraphics, nullptr,           "Ground shading",       &Config::shadowGround)
+        .Help("Detailed shadows: the ground turned away from the sun (berm faces, the back of jumps) is "
+              "shaded. No cost either way."),
     Choice3(kTabGraphics, nullptr,          "Shadow resolution",    &Config::shadowResolution, "2048", "4096", "8192")
         .Help("Detailed shadows: how sharp they are, near and far. Higher is sharper, at the cost of "
               "graphics memory and speed (8192 is for high-end graphics cards)."),

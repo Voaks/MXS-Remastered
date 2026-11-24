@@ -79,6 +79,10 @@ bool WantsShadowCasters();
 // then taken into exactly the cascades that box reaches, not judged by its origin.
 bool ShadowMatrices(const float uploaded[16], const float* anchorEye, float lightModelview[16], unsigned* cascades,
                     const float* boxLo = nullptr, const float* boxHi = nullptr);
+// How far from the camera (game units, as the sun sees it) anything in any cascade can be, this frame:
+// a draw wholly further away than that draws nothing into the map (false: no shadow map this frame).
+bool ShadowReach(double* units);
+void NoteBoxedOut();  // (for the trace: a box left out that way, counted with ShadowMatrices' own)
 int  ShadowCascades();
 // Between BeginShadowDraw and EndShadowDraw: draw into cascade i from now (its tile of the map),
 // with this projection (uploaded in place of the object's own).
@@ -237,6 +241,8 @@ void NoteCastDistance(double metres);
 // frame's (a bike can be drawn before its rider). For the shadow map: what's with the riders - their
 // bikes, their helmets - is cast as the game draws it, never held back.
 bool NearAnyRiderEye(const float eye[3], double metres);
+// Last frame's riders' hips in this frame's eye space (up to most); how many.
+int LastRiderHipsEye(float (*out)[3], int most);
 
 // For the trace: a held-back or kept draw repeated into the shadow map (skinned: with bones, a rider's
 // piece; else rigid): 0 drawn as it was kept, 1 skipped (its vertex array was given other indices
@@ -261,7 +267,13 @@ void NoteCastNowMs(double ms);
 // the indices the held-back shadow casters drew into each cascade.)
 void NoteDrawHooks(double ms);
 void NoteFlushIndices(int cascade, long long indices);
-void NoteDrawPart(int part, long long ticks);  // (a sampled draw's part: 0 snapshots .. 6 wet; QueryPerformanceCounter ticks)
+void NoteDrawPart(int part, long long ticks);
+// (For the trace: one go of drawing the held-back see-through draws again for their own depth - how
+// many, in how many calls, and the CPU time it took.)
+void NoteSeeThroughFlush(int draws, int calls, double ms, double readyMs);
+// (True in the frame F11 asked for its pictures: the log gets a closer look at that frame too.)
+bool PicturesThisFrame();
+void NoteSeeThroughFar();  // (for the trace: a see-through draw small and far off, not drawn again)  // (a sampled draw's part: 0 snapshots .. 6 wet; QueryPerformanceCounter ticks)
 void NoteLobbyMs(double ms);
 
 // For bug reports (F11): the tire marks map around you, saved as MXS_REMASTERED_marks.bmp next to

@@ -355,6 +355,9 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Graphics",  L"ShadowMap",            c.shadowMap ? 1.0 : 0.0 },
         { L"Graphics",  L"ShadowDistanceM",      c.shadowDistance },
         { L"Graphics",  L"ShadowResolution",     static_cast<double>(c.shadowResolution) },
+        { L"Graphics",  L"ShadowBikes",          c.shadowBikes ? 1.0 : 0.0 },
+        { L"Graphics",  L"ShadowObjects",        c.shadowObjects ? 1.0 : 0.0 },
+        { L"Graphics",  L"ShadowGround",         c.shadowGround ? 1.0 : 0.0 },
         { L"Graphics",  L"ShadowSoftness",       c.shadowSoftness },
         { L"Graphics",  L"Headlight",            c.headlight },
         { L"Graphics",  L"HeadlightBeamDeg",     c.headlightBeamDeg },
@@ -578,6 +581,9 @@ void CopyTunables(const Config& from, Config& to)
     to.shadowDistance       = from.shadowDistance;
     to.shadowResolution     = from.shadowResolution;
     to.shadowSoftness       = from.shadowSoftness;
+    to.shadowBikes          = from.shadowBikes;
+    to.shadowObjects        = from.shadowObjects;
+    to.shadowGround         = from.shadowGround;
     to.shadowMapSize        = from.shadowMapSize;
     to.headlight            = from.headlight;
     to.headlightBeamDeg     = from.headlightBeamDeg;
@@ -892,6 +898,9 @@ Config ParseConfig(const Config& base)
     c.shadows          = ReadDouble(L"Graphics", L"Shadows", c.shadows);
     c.shadowLength     = ReadDouble(L"Graphics", L"ShadowLength", c.shadowLength);
     c.shadowSoftness   = ReadDouble(L"Graphics", L"ShadowSoftness", c.shadowSoftness);
+    c.shadowBikes      = ReadInt(L"Graphics", L"ShadowBikes", c.shadowBikes) != 0;
+    c.shadowObjects    = ReadInt(L"Graphics", L"ShadowObjects", c.shadowObjects) != 0;
+    c.shadowGround     = ReadInt(L"Graphics", L"ShadowGround", c.shadowGround) != 0;
     c.shadowMap        = ReadInt(L"Graphics", L"ShadowMap", c.shadowMap) != 0;
     // Shadow distance in real metres (ShadowDistanceM). The old ShadowDistance was used in the
     // game's own unit, feet, though it said metres: read as that, so it covers what it did.
@@ -982,6 +991,7 @@ Config ParseConfig(const Config& base)
     c.lapTimer         = ReadInt(L"Other", L"LapTimer", c.lapTimer) != 0;
     // (A debug view, kept out of the presets and never written: [Debug] ShadowView=1..4, see Config.)
     c.shadowView       = Clamp(static_cast<int>(GetPrivateProfileIntW(L"Debug", L"ShadowView", 0, g_path)), 0, 4);
+    c.seeThroughDepth  = Clamp(static_cast<int>(GetPrivateProfileIntW(L"Debug", L"SeeThroughDepth", 1, g_path)), 0, 2);
     c.brakeSqueal      = Clamp(ReadDouble(L"Other", L"BrakeSqueal", c.brakeSqueal), 0.0, 1.0);
     c.dirtSlide        = Clamp(ReadDouble(L"Other", L"DirtSlide", c.dirtSlide), 0.0, 1.0);
     c.dabSticky        = Clamp(ReadInt(L"Other", L"DabSticky", c.dabSticky), 0, 2);

@@ -239,6 +239,8 @@ uniform float u_shadowTexel;      // one texel of the whole map (the cascades ar
 uniform float u_shadowBias[4];
 uniform float u_shadowTexelWorld[4];  // one texel of each cascade on the ground, game units
 uniform float u_shadowSoft;     // 0..1: how soft detailed shadows' edges are (Config::shadowSoftness)
+uniform float u_shadowGround;   // 1: ground turned from the sun shaded (Config::shadowGround)
+uniform float u_shadowCast;     // 0: nothing cast into the map (bikes and objects both off): not looked up
 uniform vec3  u_lightView;      // toward the light, view space
 uniform float u_headlight;      // 0 = off
 uniform int   u_headCount;      // headlights: yours first, then the nearest other bikes'
@@ -1385,8 +1387,8 @@ void main()
                     float towardsSun = towards;
                     if (far > 0.0 && abs(towards) < 0.35)
                         towardsSun = dot(normalize(mix(nView, BroadNormal(v_uv, p, nView), far)), u_lightView);
-                    float sunSide = smoothstep(-0.02 - 0.08 * far, 0.12 + 0.08 * far, towardsSun);
-                    float shade = sunSide > 0.0 ? MapShadow(p, nView, ground) : 0.0;
+                    float sunSide = u_shadowGround > 0.5 ? smoothstep(-0.02 - 0.08 * far, 0.12 + 0.08 * far, towardsSun) : 1.0;
+                    float shade = sunSide > 0.0 ? (u_shadowCast > 0.5 ? MapShadow(p, nView, ground) : 1.0) : 0.0;
                     lit = min(lit, sunSide * shade);
                     g_viewSide = sunSide;
                     g_viewCast = sunSide > 0.0 ? shade : 1.0;
@@ -1399,7 +1401,7 @@ void main()
                         towardsSun = dot(normalize(mix(nView, BroadNormalIn(u_depth, v_uv, p, nView), far)), u_lightView);
                     float facing = smoothstep(0.1 * far, 0.2 + 0.15 * far, towardsSun);
                     g_viewSide = facing;
-                    if (facing > 0.0) {
+                    if (facing > 0.0 && u_shadowCast > 0.5) {
                         float cast = MapShadow(p, nView, ground);
                         lit = min(lit, mix(1.0, cast, facing));
                         g_viewCast = cast;
