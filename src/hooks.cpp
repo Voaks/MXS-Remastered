@@ -92,6 +92,10 @@ decltype(&::glDisable)           real_glDisable           = nullptr;
 PFN_wglSwapBuffers               real_wglSwapBuffers      = nullptr;
 decltype(&::wglSwapLayerBuffers) real_wglSwapLayerBuffers = nullptr;
 decltype(&::wglGetProcAddress)   real_wglGetProcAddress   = nullptr;
+// (Exported by opengl32.dll, where GDI's ChoosePixelFormat goes, but in no header.)
+using PFN_wglChoosePixelFormat   = int(WINAPI*)(HDC, const PIXELFORMATDESCRIPTOR*);
+using PFN_wglDescribePixelFormat = int(WINAPI*)(HDC, int, UINT, PIXELFORMATDESCRIPTOR*);
+PFN_wglChoosePixelFormat         real_wglChoosePixelFormat = nullptr;
 #else
 PFN_glXSwapBuffers               real_glXSwapBuffers         = nullptr;
 PFN_glXGetProcAddress            real_glXGetProcAddress      = nullptr;
@@ -732,6 +736,42 @@ BOOL WINAPI Hook_wglSwapLayerBuffers(HDC dc, UINT planes)
     return real_wglSwapLayerBuffers(dc, planes);
 }
 
+// The window's format, as the game asks for it (GDI's ChoosePixelFormat comes here). NVIDIA's drivers
+// have depth buffers of 24 bits only; AMD's have 16 bits too, and give those to a game that asks for 16:
+// the depth's steps are then so coarse that everything read from it goes wrong - dark lines across the
+// ground's slopes (AO, shading), things at a distance flickering through each other. At least 24 bits
+// then, the rest as the game asked.
+int WINAPI Hook_wglChoosePixelFormat(HDC dc, const PIXELFORMATDESCRIPTOR* wanted)
+{
+    const int chosen = real_wglChoosePixelFormat(dc, wanted);
+    static const auto describe = reinterpret_cast<PFN_wglDescribePixelFormat>(
+        GetProcAddress(RealOpenGLModule(), "wglDescribePixelFormat"));
+    if (!wanted || !describe || chosen <= 0 || !(wanted->dwFlags & PFD_SUPPORT_OPENGL))
+        return chosen;
+    PIXELFORMATDESCRIPTOR got = {};
+    if (!describe(dc, chosen, sizeof got, &got))
+        return chosen;
+    Log("window: the game asked for %u colour, %u depth, %u stencil bits: pixel format %d (%u colour, %u depth, %u stencil)",
+        wanted->cColorBits, wanted->cDepthBits, wanted->cStencilBits, chosen, got.cColorBits, got.cDepthBits, got.cStencilBits);
+    if (got.cDepthBits == 0 || got.cDepthBits >= 24)
+        return chosen;
+    PIXELFORMATDESCRIPTOR deeper = *wanted, better = {};
+    deeper.cDepthBits = 24;
+    const int other = real_wglChoosePixelFormat(dc, &deeper);
+    // (As good as the game's in everything else: double buffered, on the window, hardware drawn.)
+    constexpr DWORD kNeeded = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    if (other <= 0 || !describe(dc, other, sizeof better, &better) || better.cDepthBits < 24 ||
+        (better.dwFlags & kNeeded) != (got.dwFlags & kNeeded) || better.iPixelType != got.iPixelType ||
+        ((better.dwFlags & PFD_GENERIC_FORMAT) && !(got.dwFlags & PFD_GENERIC_FORMAT)) || better.cColorBits < got.cColorBits ||
+        better.cStencilBits < got.cStencilBits) {
+        Log("window: no format with a deeper depth buffer: left at %u bits", got.cDepthBits);
+        return chosen;
+    }
+    Log("window: %u depth bits are too few (dark lines across the ground): pixel format %d instead (%u depth, %u stencil)",
+        got.cDepthBits, other, better.cDepthBits, better.cStencilBits);
+    return other;
+}
+
 // Everything past OpenGL 1.1 (shaders, uniforms, buffers) is fetched through here.
 PROC WINAPI Hook_wglGetProcAddress(LPCSTR name)
 {
@@ -807,7 +847,7 @@ const HookEntry* GetHookTable(size_t& count)
         MXCAM_HOOK(glDepthMask),    MXCAM_HOOK(glEnable),      MXCAM_HOOK(glDisable),
 #ifdef _WIN32
         MXCAM_HOOK(wglSwapBuffers), MXCAM_HOOK(wglSwapLayerBuffers),
-        MXCAM_HOOK(wglGetProcAddress),
+        MXCAM_HOOK(wglGetProcAddress), MXCAM_HOOK(wglChoosePixelFormat),
 #else
         MXCAM_HOOK(glXSwapBuffers), MXCAM_HOOK(glXGetProcAddress), MXCAM_HOOK(glXGetProcAddressARB),
         MXCAM_HOOK(eglSwapBuffers), MXCAM_HOOK(eglGetProcAddress),

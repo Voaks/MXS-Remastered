@@ -1,3 +1,32 @@
+# v1.6 | 2026-11-24
+MXS Remastered v1.6 OUT NOW - Lap timer, setup tab, rider/bike dirt, and more
+
+## What's new?
+- **Lap timer:** Shows your lap, current time, predicted time, checkpoint and the live gap to your best lap. You can drag it, resize it and pin it (in "Other" tab)
+- **Setups tab:** Load, save, rename and delete your bike setups from the mod menu
+- **Setup sharing:** Copy a setup as a code and send it to anyone (your name, number, gear, and controls are not affected)
+- **Bike dirt:** Mud and dust on your bike (adjustable)
+- **Rider dirt:** Mud and dust on your gear (adjustable)
+- New 250 and 125 2t sounds: Not final, probably going to have an update specifically for sounds
+- Better looking tire and roost dirt
+- Ground brightness slider: Brightens only the ground, mostly the dark berms and jump faces
+- Separate toggles for bike & rider shadows, object shadows and ground shading (helps with performance)
+- Preset codes: "Copy preset" and "Paste preset" buttons now work from any tab
+- Menu remembers the size you set
+- Better performance with detailed shadows in large lobbies
+
+## First person updates
+- Lean limiter slider: Helps with stability by cutting down how much the camera moves when you lean forward/back
+- Arm fade slider: Fades out your arms in first person from the shoulders down which allows for higher FOVs without shoulders getting in the way (works with shaders off too)
+
+## Bug fixes
+- Fixed invisible trees
+- Fixed weird horizon lines
+- Fixed stadium shadows flickering and being patchy
+- Fixed roost and water spray happening while in the air
+- Tire marks now clear when the track reloads
+- Detailed shadows optimization
+
 # v1.5 | 2026-11-15
 MXS Remastered v1.5 OUT NOW
 

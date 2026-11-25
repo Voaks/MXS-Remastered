@@ -195,6 +195,14 @@ const char* const kBikeFragment =
 
 GLuint Build(const char* vertex, const char* fragment, const char* attribute)
 {
+    // (MXCAM_TEST_GLSL150: the bike shaders as "#version 150", which the game turns its own into on AMD.)
+    std::string vertex150, fragment150;
+    if (getenv("MXCAM_TEST_GLSL150") && strncmp(vertex, "#version 300 es", 15) == 0 && strncmp(fragment, "#version 300 es", 15) == 0) {
+        vertex150 = std::string("#version 150") + (vertex + 15);
+        fragment150 = std::string("#version 150") + (fragment + 15);
+        vertex = vertex150.c_str();
+        fragment = fragment150.c_str();
+    }
     const GLuint vs = gl.CreateShader(0x8B31), fs = gl.CreateShader(0x8B30);
     gl.ShaderSource(vs, 1, &vertex, nullptr);
     gl.ShaderSource(fs, 1, &fragment, nullptr);

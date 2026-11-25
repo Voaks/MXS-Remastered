@@ -187,6 +187,11 @@ bool FrameRawView(double raw[16]);
 // The one it's drawn with (after the helmet cam's correction: an uploaded u_modelview is
 // View * Model with it), and the world's up (unit).
 bool FrameRenderedView(double rendered[16], double up[3]);
+// The colour of the light on the ground (the game's own values, gamma space, any brightness): for telling
+// sand from dirt by its colour on a track with a coloured sun.
+void NoteGroundLightColor(const double rgb[3]);
+// Whether that's needed: the dirt's colour changed or the ground brightened (Config::dirtColor, groundBrightness).
+bool WantsGroundLightColor();
 // Wheel i (0 rear, 1 front) drawn by the game this frame and taken for yours: every part of it that
 // turns about its axle (the tire, rim and spokes, the brake disc, the sprocket: the one followed can
 // be any of them, and the mask was once just the disc), each one's u_modelview as the game sent it

@@ -241,6 +241,8 @@ uniform float u_shadowTexelWorld[4];  // one texel of each cascade on the ground
 uniform float u_shadowSoft;     // 0..1: how soft detailed shadows' edges are (Config::shadowSoftness)
 uniform float u_shadowGround;   // 1: ground turned from the sun shaded (Config::shadowGround)
 uniform float u_groundBright;   // 1..3: the ground alone brighter (Config::groundBrightness)
+uniform float u_dirtColor;      // 0..2: how strong the dirt's colour is, 1 as the track has it (Config::dirtColor)
+uniform vec3  u_dirtLight;      // takes the colour of the track's light out of the ground's (1 1 1: white light)
 uniform float u_shadowCast;     // 0: nothing cast into the map (bikes and objects both off): not looked up
 uniform vec3  u_lightView;      // toward the light, view space
 uniform float u_headlight;      // 0 = off
@@ -1355,6 +1357,27 @@ void main()
             }
             if (u_marks > 0.0 && ground > 0.5)
                 c = TireMarks(c, pD, wpD, dwxD, dwyD, nFloor, lFloor, lHere, relief);
+)GLSL" R"GLSL(
+            // Dirt colour: the dirt's own colour stronger or weaker, as bright as it was. Only where it's dirt:
+            // more red than green (a track's grass is as green as red or greener), eased in, and not sand: sand is
+            // yellower (the same however strong its colour or bright it is: 0.5 and up here, brown dirt 0.2 to
+            // 0.43; by the pictures and the tracks' own textures). Under the snow and the rain.
+            float sand = 0.0;  // (how much this is sand: for the ground brightness below)
+            float yellow = 0.0, reddish = 0.0;
+            if ((u_dirtColor != 1.0 || u_groundBright > 1.0) && ground > 0.0) {
+                vec3 own = c * u_dirtLight;
+                yellow = (own.g - own.b) / max(own.r - own.b, 1e-4);
+                reddish = smoothstep(0.02, 0.18, (own.r - own.g) / max(own.r, 1e-4));
+                sand = reddish * smoothstep(0.42, 0.52, yellow);
+            }
+            if (u_dirtColor != 1.0 && ground > 0.0) {
+                float dirt = reddish * (1.0 - smoothstep(0.43, 0.49, yellow));
+                // (Never so strong that its weakest colour - its blue - falls under a quarter of what it was: dirt
+                // already strongly coloured, under a warm sun, went neon orange.)
+                float l = Luma(c), least = min(c.r, min(c.g, c.b));
+                float strongest = (l - 0.25 * least) / max(l - least, 1e-5);
+                c = max(mix(vec3(l), c, min(1.0 + (u_dirtColor - 1.0) * ground * dirt, strongest)), vec3(0.0));
+            }
             // (Snow on what this pixel shows of the ground: where a groove was dug, its floor - so a rut
             // that is dug into the ground also shows the dirt through the snow.)
             if (u_snow > 0.0 && ground > 0.001)
@@ -1403,9 +1426,9 @@ void main()
                     float facing = smoothstep(0.1 * far, 0.2 + 0.15 * far, towardsSun);
                     g_viewSide = facing;
                     if (facing > 0.0 && u_shadowCast > 0.5) {
-                        float cast = MapShadow(p, nView, ground);
-                        lit = min(lit, mix(1.0, cast, facing));
-                        g_viewCast = cast;
+                        float mapLit = MapShadow(p, nView, ground);
+                        lit = min(lit, mix(1.0, mapLit, facing));
+                        g_viewCast = mapLit;
                     }
                 }
             }
@@ -1413,9 +1436,14 @@ void main()
             albedo = c * ao;
             // (Overcast in the snow: the sun's shadows fade, the light comes from the whole sky.)
             c *= ao * mix(1.0, mix(0.42, 1.0, lit), u_shadow * (1.0 - 0.65 * u_overcast));
-            // Ground brightness: dark ground by all of it, sunny ground by a third, snow hardly.
-            if (u_groundBright > 1.0)
-                c *= 1.0 + (u_groundBright - 1.0) * ground * mix(1.0, 0.35, smoothstep(0.01, 0.12, Luma(c))) * (1.0 - 0.8 * snowCover);
+            // Ground brightness: dark ground by all of it, sunny ground by a third, what's bright already by less
+            // still, sand by a third of that, snow hardly. (Sand is bright as it is: at the slider's most it went
+            // past white, all its grain gone, beside dirt that had only come up to a good brightness.)
+            if (u_groundBright > 1.0) {
+                float l = Luma(c);
+                c *= 1.0 + (u_groundBright - 1.0) * ground * mix(1.0, 0.35, smoothstep(0.01, 0.12, l)) *
+                               (1.0 - 0.6 * smoothstep(0.15, 0.5, l)) * (1.0 - 0.65 * sand) * (1.0 - 0.8 * snowCover);
+            }
             // Snow in shade (the sun's shadow, a crease) is lit by the sky alone: cold, blue-grey.
             if (snowCover > 0.0)
                 c *= mix(vec3(1.0), vec3(0.84, 0.92, 1.1),

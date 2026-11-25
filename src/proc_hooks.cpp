@@ -7575,6 +7575,44 @@ void RaiseGroundAmbient()
     }
 }
 
+// The light on the ground, once a frame while sand and dirt are told apart (Config::dirtColor,
+// groundBrightness): the terrain program's ambient and sun, as the game sent them.
+void NoteGroundLight()
+{
+    static unsigned frame = 0;
+    static GLuint program = 0;
+    static GLint ambient = -1, diffuse = -1;
+    if (frame == g_frameNumber || !postfx::WantsGroundLightColor() || !real_glGetUniformLocation)
+        return;
+    frame = g_frameNumber;
+    if (program != g_program) {
+        program = g_program;
+        ambient = real_glGetUniformLocation(g_program, "u_ambient");
+        diffuse = real_glGetUniformLocation(g_program, "u_diffuse");
+    }
+    const auto uniforms = g_programUniforms.find(g_program);
+    if (uniforms == g_programUniforms.end())
+        return;
+    const std::vector<UniformSlot>& now = uniforms->second.now;
+    const auto Value = [&now](GLint location, int kind) {
+        const bool known = location >= 0 && static_cast<size_t>(location) < now.size() && now[static_cast<size_t>(location)].kind == kind;
+        return known ? now[static_cast<size_t>(location)].v : nullptr;
+    };
+    const GLfloat* shade = Value(ambient, 5);
+    const GLfloat* sun = Value(diffuse, 4);
+    if (!shade || !sun)
+        return;
+    double light[3];  // (ground about as steep to the sun as flat ground mostly is)
+    for (int k = 0; k < 3; ++k)
+        light[k] = std::max(0.0, static_cast<double>(shade[k])) + 0.7 * std::max(0.0, static_cast<double>(sun[k]));
+    postfx::NoteGroundLightColor(light);
+    static bool told = false;
+    if (!told) {
+        told = true;
+        Log("ground: the light on the ground %.2f %.2f %.2f", light[0], light[1], light[2]);
+    }
+}
+
 bool NoteDrawInner(const DrawCall& draw, bool timed)
 {
     // (For the trace: every 8th draw's own parts timed - snapshots, checks, bones, wheels, shadow,
@@ -7681,6 +7719,7 @@ bool NoteDrawInner(const DrawCall& draw, bool timed)
         Part(6);
         return true;
     }
+    NoteGroundLight();
     RaiseGroundAmbient();
     const auto found = g_elementBuffers.find(g_vao);
     const GLuint elementBuffer = found != g_elementBuffers.end() ? found->second : 0;

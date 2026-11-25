@@ -75,6 +75,16 @@ constexpr GLenum kDepth24Stencil8           = 0x88F0;
 constexpr GLenum kDepthStencil              = 0x84F9;
 constexpr GLenum kUnsignedInt248            = 0x84FA;
 constexpr GLenum kDepthComponent24          = 0x81A6;
+constexpr GLenum kDepthComponent16          = 0x81A5;
+constexpr GLenum kDepthComponent32          = 0x81A7;
+constexpr GLenum kDepthComponent32f         = 0x8CAC;
+constexpr GLenum kDepth32fStencil8          = 0x8CAD;
+constexpr GLenum kFloat32Stencil8Rev        = 0x8DAD;
+constexpr GLenum kAttachmentDepthSize       = 0x8216;
+constexpr GLenum kAttachmentStencilSize     = 0x8217;
+constexpr GLenum kAttachmentComponentType   = 0x8211;
+constexpr GLenum kWindowDepth               = 0x1801;  // GL_DEPTH, GL_STENCIL: the window's own
+constexpr GLenum kWindowStencil             = 0x1802;
 constexpr GLenum kTextureCompareMode        = 0x884C;
 constexpr GLenum kClampToEdge               = 0x812F;
 constexpr GLenum kArrayBuffer               = 0x8892;
@@ -480,7 +490,7 @@ struct Resources {
     GLuint  ownFbo = 0, ownDepth = 0;              // the see-through draws again, depth only (BeginSeeThroughDepth)
     bool    ownOk = false;                         // (its framebuffer complete)
     GLuint  sampleFbo = 0, sampleDepth = 0;        // that depth, downsampled, to read back
-    int     samplePacking = -1;                    // the depth format it was made in (depthMode's)
+    int     samplePacking = -1;                    // the depth format it was made in (DepthFormatOf's)
     bool    sampleFailed = false;                  // reading it back didn't work: tried once
     // That read, without waiting for it: into one of these buffers, taken a frame or two later when
     // the GPU has done it (with the view and projection of the frame it was read in).
@@ -497,7 +507,10 @@ struct Resources {
     bool    marksCleared = false;
     int     shadowSize = 0;
     int     colorMode = 0;  // 0 = untried, 1 = blit, 2 = copy, -1 = nothing works
-    int     depthMode = 0;  // 0 = untried, 1 = blit (depth24 + stencil8), 2 = blit (depth24), 3 = copy, -1 = none
+    int     depthMode = 0;  // 0 = untried, 1 = blit (depth24 + stencil8), 2 = blit (depth24), 3 = copy, -1 = none,
+                            // 4 = blit, in the window's own format (windowDepth*: not 24 bits; tried first)
+    int     windowDepthBits = 0, windowStencilBits = 0;  // the window's depth buffer (0: not known)
+    bool    windowDepthFloat = false;
     bool    colorVerified = false, depthVerified = false;
     Target  hdr, a, b, ldr, light, dof, rays, focus[2];
     Target  bloom[kBloomLevels];
@@ -664,6 +677,15 @@ GLuint BuildProgram(const char* version, const char* body, std::string& error)
 
 bool BuildPrograms()
 {
+    using PFN_GetString = const GLubyte*(APIENTRY*)(GLenum);
+    if (const auto text = reinterpret_cast<PFN_GetString>(GetRealGLFunction("glGetString"))) {
+        const auto Of = [&](GLenum name) {
+            const GLubyte* s = text(name);
+            return s ? reinterpret_cast<const char*>(s) : "?";
+        };
+        Log("postfx: graphics driver: %s, %s, OpenGL %s, GLSL %s", Of(GL_VENDOR), Of(GL_RENDERER), Of(GL_VERSION),
+            Of(0x8B8C /* GL_SHADING_LANGUAGE_VERSION */));
+    }
     const char* const versions[] = { "#version 150\n", "#version 130\n" };
     for (const char* version : versions) {
         bool ok = true;
@@ -916,15 +938,73 @@ bool MakeTarget(Target& t, int w, int h, GLint internal, GLenum format, GLenum t
     return g_gl.CheckFramebufferStatus(kFramebuffer) == kFramebufferComplete;
 }
 
+// The window's depth buffer: its bits, and whether they're floats. NVIDIA's are 24 bits, which the textures
+// below always were; AMD's drivers give 32 (and 16) too, and OpenGL only lets depth be copied between two of
+// the very same format (some drivers convert, others refuse or leave the copy as it was).
+void ReadWindowDepthFormat()
+{
+    g_res.windowDepthBits = g_res.windowStencilBits = 0;
+    g_res.windowDepthFloat = false;
+    using PFN_GetAttachment = void(APIENTRY*)(GLenum, GLenum, GLenum, GLint*);
+    static const auto get = reinterpret_cast<PFN_GetAttachment>(GetRealGLFunction("glGetFramebufferAttachmentParameteriv"));
+    if (!get)
+        return;
+    DrainErrors();
+    GLint depth = 0, stencil = 0, type = 0;
+    g_gl.BindFramebuffer(kReadFramebuffer, 0);
+    get(kReadFramebuffer, kWindowDepth, kAttachmentDepthSize, &depth);
+    const bool depthOk = g_gl.GetError() == GL_NO_ERROR;
+    get(kReadFramebuffer, kWindowStencil, kAttachmentStencilSize, &stencil);
+    if (g_gl.GetError() != GL_NO_ERROR)  // (none: asking its size can be an error)
+        stencil = 0;
+    if (!depthOk || depth <= 0)
+        return;
+    get(kReadFramebuffer, kWindowDepth, kAttachmentComponentType, &type);
+    if (g_gl.GetError() != GL_NO_ERROR)
+        type = 0;
+    g_res.windowDepthBits = depth;
+    g_res.windowStencilBits = stencil;
+    g_res.windowDepthFloat = type == GL_FLOAT;
+    static int logged = -1;
+    const int key = depth * 1000 + stencil * 2 + (type == GL_FLOAT ? 1 : 0);
+    if (key != logged) {
+        logged = key;
+        Log("postfx: the window's depth buffer: %d bits%s, %d stencil", depth, type == GL_FLOAT ? " (float)" : "", stencil);
+    }
+}
+
+// The format depth textures are made in for a depthMode.
+struct DepthFormat {
+    GLenum internal, format, type;
+    bool   packed;  // with the stencil
+};
+DepthFormat DepthFormatOf(int mode)
+{
+    if (mode == 4) {
+        if (g_res.windowDepthBits == 16)
+            return { kDepthComponent16, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, false };
+        if (g_res.windowStencilBits > 0)
+            return { kDepth32fStencil8, kDepthStencil, kFloat32Stencil8Rev, true };
+        return { g_res.windowDepthFloat ? kDepthComponent32f : kDepthComponent32, GL_DEPTH_COMPONENT, GL_FLOAT, false };
+    }
+    if (mode <= 1)
+        return { kDepth24Stencil8, kDepthStencil, kUnsignedInt248, true };
+    return { kDepthComponent24, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, false };
+}
+
 // The two depth textures, in the format the current depthMode copies into (untried: the first).
 bool MakeDepthTextures()
 {
-    const bool packed = g_res.depthMode <= 1;
+    if (g_res.depthMode == 0 || g_res.depthMode == 4) {
+        ReadWindowDepthFormat();
+        g_res.depthMode = g_res.windowDepthBits == 16 || g_res.windowDepthBits == 32 ? 4 : 0;
+    }
+    const DepthFormat made = DepthFormatOf(g_res.depthMode);
+    const bool packed = made.packed;
     for (GLuint* tex : { &g_res.depth, &g_res.terrainDepth, &g_res.seeDepth, &g_res.ownDepth }) {
         if (*tex)
             g_gl.DeleteTextures(1, tex);
-        *tex = packed ? NewTexture(kDepth24Stencil8, g_res.width, g_res.height, kDepthStencil, kUnsignedInt248, GL_NEAREST)
-                      : NewTexture(kDepthComponent24, g_res.width, g_res.height, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, GL_NEAREST);
+        *tex = NewTexture(static_cast<GLint>(made.internal), g_res.width, g_res.height, made.format, made.type, GL_NEAREST);
         g_gl.TexParameteri(GL_TEXTURE_2D, kTextureCompareMode, GL_NONE);
     }
     const GLenum attachment = packed ? kDepthStencilAttachment : kDepthAttachment;
@@ -1085,7 +1165,7 @@ bool CaptureDepth(GLuint fbo, GLuint tex)
         if (!g_res.depthVerified)
             DrainErrors();
         g_gl.BindFramebuffer(kReadFramebuffer, 0);
-        if (g_res.depthMode <= 2) {
+        if (g_res.depthMode != 3) {
             g_gl.BindFramebuffer(kDrawFramebuffer, fbo);
             g_gl.BlitFramebuffer(0, 0, g_res.width, g_res.height, 0, 0, g_res.width, g_res.height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
         } else {
@@ -1095,11 +1175,13 @@ bool CaptureDepth(GLuint fbo, GLuint tex)
         }
         if (g_res.depthVerified || g_gl.GetError() == GL_NO_ERROR) {
             if (!g_res.depthVerified)
-                Log("postfx: the depth buffer is read with a %s", g_res.depthMode <= 2 ? "blit" : "texture copy");
+                Log("postfx: the depth buffer is read with a %s%s", g_res.depthMode != 3 ? "blit" : "texture copy",
+                    g_res.depthMode == 4 ? ", in the window's own format" : "");
             g_res.depthVerified = true;
             return true;
         }
-        if (++g_res.depthMode > 3) {
+        g_res.depthMode = g_res.depthMode == 4 ? 1 : g_res.depthMode + 1;
+        if (g_res.depthMode > 3) {
             g_res.depthMode = -1;
             Log("postfx: the depth buffer can't be read; AO, shadows, dirt detail, sky, DOF and motion blur are off");
             return false;
@@ -1226,6 +1308,10 @@ timeofday::Sky CurrentSky()
     return cfg.timeOfDay >= 0 ? timeofday::Compute(cfg.timeOfDay, g_gameSun, WorldUp(), cfg.nightBrightness)
                               : timeofday::Neutral(g_gameSun, WorldUp());
 }
+
+// The dirt's colour changed (the slider's 100%, give or take its own rounding: not).
+bool DirtColorOn(const Config& cfg) { return std::fabs(cfg.dirtColor - 1.0) > 0.005; }
+float g_dirtLight[3] = { 1.0f, 1.0f, 1.0f };  // takes the light's colour out of the ground's (NoteGroundLightColor)
 
 // What lights the scene: the game's sun, or ours when the time of day turns it.
 Vec3 SceneLight(const timeofday::Sky& sky)
@@ -3813,18 +3899,17 @@ bool FillTerrainFromDepth()
         return false;
     // The depth is read in whatever format the depth textures were made in, and remade if that
     // changed with the window.
-    const int packing = g_res.depthMode <= 1 ? 1 : 0;
+    const DepthFormat made = DepthFormatOf(g_res.depthMode);
+    const int packing = static_cast<int>(made.internal);
     if (g_res.sampleDepth == 0 || g_res.samplePacking != packing) {
         if (g_res.sampleDepth)
             g_gl.DeleteTextures(1, &g_res.sampleDepth);
-        g_res.sampleDepth = packing ? NewTexture(kDepth24Stencil8, kSampleWidth, kSampleHeight, kDepthStencil,
-                                                 kUnsignedInt248, GL_NEAREST)
-                                    : NewTexture(kDepthComponent24, kSampleWidth, kSampleHeight, GL_DEPTH_COMPONENT,
-                                                 GL_UNSIGNED_INT, GL_NEAREST);
+        g_res.sampleDepth = NewTexture(static_cast<GLint>(made.internal), kSampleWidth, kSampleHeight, made.format, made.type,
+                                       GL_NEAREST);
         if (!g_res.sampleFbo)
             g_gl.GenFramebuffers(1, &g_res.sampleFbo);
         g_gl.BindFramebuffer(kFramebuffer, g_res.sampleFbo);
-        g_gl.FramebufferTexture2D(kFramebuffer, packing ? kDepthStencilAttachment : kDepthAttachment,
+        g_gl.FramebufferTexture2D(kFramebuffer, made.packed ? kDepthStencilAttachment : kDepthAttachment,
                                   GL_TEXTURE_2D, g_res.sampleDepth, 0);
         g_res.samplePacking = packing;
         if (!g_res.sampleDepth || g_gl.CheckFramebufferStatus(kFramebuffer) != kFramebufferComplete) {
@@ -6755,6 +6840,8 @@ void Render(int w, int h)
         // Always on its own unit: a shadow sampler may not share one with an ordinary sampler.
         Bind(p, "u_shadowMap", 5, g_res.shadowMap);
         g_gl.Uniform1f(p["u_groundBright"], static_cast<float>(cfg.groundBrightness));
+        g_gl.Uniform1f(p["u_dirtColor"], DirtColorOn(cfg) ? static_cast<float>(cfg.dirtColor) : 1.0f);
+        g_gl.Uniform3f(p["u_dirtLight"], g_dirtLight[0], g_dirtLight[1], g_dirtLight[2]);
         g_gl.Uniform1f(p["u_shadowMapOn"], shadowMapOn ? 1.0f : 0.0f);
         g_gl.Uniform1f(p["u_shadowView"], static_cast<float>(cfg.shadowView));
         if (shadowMapOn) {
@@ -7935,6 +8022,19 @@ bool ShadowReach(double* units)
 
 void NoteBoxedOut() { ++g_castBoxed[0]; }
 
+void NoteGroundLightColor(const double rgb[3])
+{
+    const double most = std::max({ rgb[0], rgb[1], rgb[2] });
+    for (int k = 0; k < 3; ++k)
+        g_dirtLight[k] = most > 0.02 ? static_cast<float>(std::min(1.0 / std::pow(std::max(rgb[k] / most, 0.05), 2.2), 6.0)) : 1.0f;
+}
+
+bool WantsGroundLightColor()
+{
+    const Config& cfg = GetConfig();
+    return cfg.shaders && (DirtColorOn(cfg) || cfg.groundBrightness > 1.0);
+}
+
 bool FrameRenderedView(double rendered[16], double up[3])
 {
     if (!g_frame.haveView)
@@ -8401,7 +8501,7 @@ void TerrainPassDone()
 {
     g_frame.terrainDone = true;
     const Config& cfg = GetConfig();
-    if (!cfg.shaders || (cfg.dirtDetail <= 0.0 && cfg.tireMarks <= 0.0 && TireCoat(cfg) <= 0.0 && cfg.weather == kWeatherNone && !RoostOn(cfg) && cfg.groundBrightness <= 1.0) || !g_frame.haveView || g_frame.terrainSnapshot || g_frame.applied ||
+    if (!cfg.shaders || (cfg.dirtDetail <= 0.0 && cfg.tireMarks <= 0.0 && TireCoat(cfg) <= 0.0 && cfg.weather == kWeatherNone && !RoostOn(cfg) && cfg.groundBrightness <= 1.0 && !DirtColorOn(cfg)) || !g_frame.haveView || g_frame.terrainSnapshot || g_frame.applied ||
         g_res.failed || !LoadGL())
         return;
     GLint drawFb = 0;
