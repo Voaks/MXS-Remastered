@@ -22,6 +22,7 @@
 #include <windows.h>
 #include <GL/gl.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -38,11 +39,13 @@
 #include "bike.h"
 #include "config.h"
 #include "dab.h"
+#include "gamertags.h"
 #include "hooks.h"
 #include "lobby_wheels.h"
 #include "log.h"
 #include "mathlib.h"
 #include "motion.h"
+#include "overlay.h"
 #include "postfx.h"
 #include "postfx_shaders.h"
 #include "replay.h"
@@ -555,6 +558,7 @@ struct Frame {
     bool   haveView = false;
     double raw[16] = {}, rendered[16] = {};
     bool   applied = false;
+    bool   tagsDone = false;                   // the gamer tags drawn (GamerTagsNow)
     bool   terrainSnapshot = false;
     bool   haveLight = false;
     float  lightEye[3] = {};
@@ -1448,6 +1452,7 @@ struct RiderPoint {
     float viewModel[16];
     float hips[3], torso[9];
     bool  transposed;
+    unsigned texture;  // what its first draw of the frame was drawn with
 };
 std::vector<RiderPoint> g_riderPoints;
 std::vector<Vec3>       g_lastRiderHips;  // last frame's riders' hips (world), for NearAnyRiderEye
@@ -7755,6 +7760,124 @@ void TimerEnd(int slot)
     }
 }
 
+// ---- Gamer tags (Config::gamerTags, gamertags.h) --------------------------------------------------
+// The riders drawn this frame, and the names of those known over their heads: onto the window, hidden by
+// what's in front of them (its depth). stateSaved: the game's state is put back by the caller, but for the depth test's function
+// (depthFunc: what the game has - asked with the rest, before the effects draw: asked after, the driver
+// would have to be waited for).
+void GamerTagsNow(int w, int h, bool stateSaved, GLint depthFunc = 0)
+{
+    const Config& cfg = GetConfig();
+    if (!cfg.gamerTags) {
+        gamertags::Frame(0.0, false, nullptr, nullptr, 0, -1);
+        return;
+    }
+    if (!g_frame.haveView || g_frame.tagsDone)
+        return;
+    g_frame.tagsDone = true;
+    const double now = Seconds();
+    static std::vector<std::array<float, 3>> riders;
+    static std::vector<unsigned> skins;
+    static std::vector<NameTag> tags;
+    riders.clear();
+    skins.clear();
+    tags.clear();
+    double invRaw[16];
+    if (!AffineInverse(g_frame.raw, invRaw))
+        return;
+    double yours[3];
+    const bool haveYours = OwnPosition(yours);
+    int own = -1;
+    double nearest = 1.5 * g_unitsPerMetre;
+    for (const RiderPoint& r : g_riderPoints) {
+        double vm[16], world[16];
+        for (int i = 0; i < 16; ++i)
+            vm[i] = r.viewModel[i];
+        MatMul(invRaw, vm, world);
+        const Vec3 p = TransformPoint(world, Vec3{ r.hips[0], r.hips[1], r.hips[2] });
+        if (haveYours) {
+            const double d = Length(p - Vec3{ yours[0], yours[1], yours[2] });
+            if (d < nearest) {
+                nearest = d;
+                own = static_cast<int>(riders.size());
+            }
+        }
+        riders.push_back({ static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z) });
+        skins.push_back(r.texture);
+    }
+    static double before = -1;
+    const double dt = before >= 0 ? Clamp(now - before, 0.0, 0.1) : 0.0;
+    before = now;
+    gamertags::Frame(now, true, reinterpret_cast<const float(*)[3]>(riders.data()), skins.data(), static_cast<int>(riders.size()), own);
+
+    const float* proj = g_haveProjCamera ? g_projCamera : (g_haveProjOther ? g_projOther : nullptr);
+    if (!proj)
+        return;
+    double P[16], viewProj[16];
+    for (int i = 0; i < 16; ++i)
+        P[i] = proj[i];
+    MatMul(P, g_frame.rendered, viewProj);
+    const Vec3 up = WorldUp();
+    const double reach = cfg.gamerTagDistance * g_unitsPerMetre;
+    for (size_t i = 0; i < riders.size(); ++i) {
+        const gamertags::Tag tag = gamertags::Of(static_cast<int>(i));
+        if (!tag.name[0] || tag.fade <= 0.0f)  // (you: no name)
+            continue;
+        const Vec3 at = Vec3{ riders[i][0], riders[i][1], riders[i][2] } + up * (1.25 * g_unitsPerMetre);
+        const Vec3 eye = TransformPoint(g_frame.rendered, at);
+        const double distance = Length(eye);
+        if (distance >= reach || distance < 1.0 * g_unitsPerMetre)
+            continue;
+        const double clip[4] = {
+            viewProj[0] * at.x + viewProj[4] * at.y + viewProj[8] * at.z + viewProj[12],
+            viewProj[1] * at.x + viewProj[5] * at.y + viewProj[9] * at.z + viewProj[13],
+            viewProj[2] * at.x + viewProj[6] * at.y + viewProj[10] * at.z + viewProj[14],
+            viewProj[3] * at.x + viewProj[7] * at.y + viewProj[11] * at.z + viewProj[15],
+        };
+        if (clip[3] < 0.1)
+            continue;
+        const double nx = clip[0] / clip[3], ny = clip[1] / clip[3], nz = clip[2] / clip[3];
+        if (std::fabs(nx) > 1.2 || std::fabs(ny) > 1.2 || std::fabs(nz) >= 1.0)
+            continue;
+        // (Fading out over the last fifth of the distance, and right in front of the camera.)
+        const double fade = tag.fade * Clamp((reach - distance) / (0.2 * reach), 0.0, 1.0) *
+                            Clamp((distance / g_unitsPerMetre - 1.0) / 1.5, 0.0, 1.0);
+        NameTag t;
+        t.x = static_cast<float>((nx * 0.5 + 0.5) * w);
+        t.y = static_cast<float>((0.5 - ny * 0.5) * h);
+        t.z = static_cast<float>(nz);
+        t.distance = static_cast<float>(distance);
+        // As big as a sign there would be, but never too small to read nor in the way.
+        const double ui = Clamp(h / 1080.0, 0.5, 2.0);
+        t.height = static_cast<float>(cfg.gamerTagSize * Clamp(0.45 * g_unitsPerMetre * P[5] * 0.5 * h / distance, 18.0 * ui, 46.0 * ui));
+        t.alpha = static_cast<float>(fade);
+        t.name = tag.name;
+        t.lift = tag.lift;
+        tags.push_back(t);
+    }
+    const double drawFrom = Seconds();
+    if (!tags.empty())
+        OverlayNameTags(tags.data(), static_cast<int>(tags.size()), w, h, static_cast<float>(dt), stateSaved, depthFunc);
+    // (What it costs, for the log: now and then, a few times.)
+    static double spent = 0;
+    static int frames = 0, told = 0, shown = 0, seen = 0;
+    static int warm = 0;  // (not the first ones: the font and the shader made)
+    if (told < 6 && (!tags.empty() || warm) && ++warm > 60) {
+        static double drawing = 0;
+        drawing += Seconds() - drawFrom;
+        spent += Seconds() - now;
+        shown += static_cast<int>(tags.size());
+        seen += static_cast<int>(riders.size());
+        if (++frames == (told ? 5000 : 100)) {
+            Log("gamer tags: %.1f us a frame on the game's thread, %.1f of them drawing (%.1f riders drawn, %.1f tags; over %d frames)", 1e6 * spent / frames, 1e6 * drawing / frames,
+                static_cast<double>(seen) / frames, static_cast<double>(shown) / frames, frames);
+            spent = drawing = 0;
+            frames = shown = seen = 0;
+            ++told;
+        }
+    }
+}
+
 bool g_effectsTimerOpen = false;
 void ApplyInner();
 void Apply()
@@ -7793,6 +7916,9 @@ void ApplyInner()
     Save(saved);
     for (int i = 0; i < 4; ++i)
         g_gameViewport[i] = saved.viewport[i];
+    GLint depthFunc = 0;
+    if (GetConfig().gamerTags)
+        g_gl.GetIntegerv(GL_DEPTH_FUNC, &depthFunc);
     DrawStandIns();       // (its program and vertex array are put back with the rest)
     // With nothing at all cast this frame (Bike & rider shadows and Object shadows both off, or nothing in
     // reach), the map is still made, empty: the ground's shading and the shadow map's way of lighting
@@ -7814,6 +7940,7 @@ void ApplyInner()
         }
         Render(w, h);
     }
+    GamerTagsNow(w, h, true, depthFunc);  // (here the window's depth is still the scene's, and the state's saved anyway)
     Restore(saved);
 }
 
@@ -8529,7 +8656,7 @@ void TerrainPassDone()
 
 // A rider's skeleton (any distance): its hips and torso, once per rider (a rider takes several draws).
 void NoteRiderPoint(const float* centres, const float* positions, const float* rotations, bool transposed, int bones,
-                    const float modelview[16])
+                    const float modelview[16], unsigned texture)
 {
     if (bones < 8 || bones > 12 || g_riderPoints.size() >= 128)
         return;
@@ -8566,14 +8693,14 @@ void NoteRiderPoint(const float* centres, const float* positions, const float* r
     std::copy(h, h + 3, r.hips);
     std::copy(rotations + torso * 9, rotations + torso * 9 + 9, r.torso);
     r.transposed = transposed;
+    r.texture = texture;
     g_riderPoints.push_back(r);
 }
 
 void NoteSkeleton(unsigned program, const float* centres, const float* positions, const float* rotations, bool transposed,
-                  int bones, const float modelview[16])
+                  int bones, const float modelview[16], unsigned texture)
 {
-    if (!centres || !positions || !rotations || !modelview || bones <= 0 || bones > kSkeletonBones ||
-        g_skeletons.size() >= 400)
+    if (!centres || !positions || !rotations || !modelview || bones <= 0 || bones > kSkeletonBones)
         return;
     // Only what's near the camera matters (your rider, your bike): skip the rest of the track.
     {
@@ -8583,8 +8710,9 @@ void NoteSkeleton(unsigned program, const float* centres, const float* positions
                     ez = m[2] * x + m[6] * y + m[10] * z + m[14];
         const float distance2 = ex * ex + ey * ey + ez * ez;
         if (distance2 < kRiderPointRange * kRiderPointRange)
-            NoteRiderPoint(centres, positions, rotations, transposed, bones, modelview);
-        if (distance2 > 60.0f * 60.0f)
+            NoteRiderPoint(centres, positions, rotations, transposed, bones, modelview, texture);
+        // (At most 400 kept - every rider's point above, though: at a full gate the far ones went without.)
+        if (distance2 > 60.0f * 60.0f || g_skeletons.size() >= 400)
             return;
     }
     // The same draw again (a rider takes several): skip it.
@@ -9088,6 +9216,14 @@ void FrameEnd(bool apply)
         }
         g_frame.applied = true;
         Apply();
+    }
+    // The gamer tags, when the effects didn't draw them (Shaders off).
+    if (!cfg.gamerTags) {
+        GamerTagsNow(0, 0, false);
+    } else if (g_frame.haveView && !g_frame.tagsDone && LoadGL()) {
+        int w = 0, h = 0;
+        if (WindowSize(w, h))
+            GamerTagsNow(w, h, false);
     }
     ++g_timerFrame;
     g_castNowMsTraced = g_castNowMs;

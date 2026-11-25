@@ -32,8 +32,9 @@ bool OverrideLight(const float* value, int count, int components, float* out);
 // positions, rotations; v = R (p - c) + t) and the u_modelview it's drawn with (as the game sent
 // it). A rigid draw of a skinned program comes as one bone at its origin. Your own rider is the
 // one nearest the camera; the bones under it that keep turning are your bike's wheels.
+// (texture: what's bound for it, 0 not known.)
 void NoteSkeleton(unsigned program, const float* centres, const float* positions, const float* rotations, bool transposed,
-                  int bones, const float modelview[16]);
+                  int bones, const float modelview[16], unsigned texture = 0);
 
 // Every object the game draws in the 3D scene this frame (its u_modelview as sent, View * Model,
 // column-major): one of them is your bike, which carries the headlight in any camera.

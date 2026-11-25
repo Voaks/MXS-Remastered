@@ -226,6 +226,9 @@ struct Config {
     bool   hideCursor       = false;      // hide the game's mouse cursor while riding (same)
     double brakeSqueal      = 0.0;        // 0..1 the brake squeal's loudness (brake.cpp; 0 = off): OTHER, SOUND MODS
     bool   dabIndicator     = false;      // bottom right: red standing, green while the game's Sit/Dab key sits you (dab.cpp)
+    bool   gamerTags        = false;      // the riders' names over their heads (gamertags.h)
+    double gamerTagDistance = 60.0;       // m: riders out to this far
+    double gamerTagSize     = 1.0;        // 0.5..2: how big
     bool   lapTimer         = false;
     int    seeThroughDepth  = 1;          // [Debug] SeeThroughDepth=0: see-through draws (trees, the crowd) aren't drawn
                                           // again for their own depth; 2: only those the game writes afresh every frame

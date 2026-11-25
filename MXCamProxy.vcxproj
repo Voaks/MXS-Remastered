@@ -103,6 +103,7 @@
     <ClCompile Include="src\dab.cpp" />
     <ClCompile Include="src\gamelog.cpp" />
     <ClCompile Include="src\laptimer.cpp" />
+    <ClCompile Include="src\gamertags.cpp" />
     <ClCompile Include="src\gamepad.cpp" />
     <ClCompile Include="src\lobby_wheels.cpp" />
     <ClCompile Include="src\hooks.cpp" />
@@ -133,6 +134,7 @@
     <ClInclude Include="src\dab.h" />
     <ClInclude Include="src\gamelog.h" />
     <ClInclude Include="src\laptimer.h" />
+    <ClInclude Include="src\gamertags.h" />
     <ClInclude Include="src\gamepad.h" />
     <ClInclude Include="src\lobby_wheels.h" />
     <ClInclude Include="src\hooks.h" />
@@ -150,9 +152,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="src\gl_exports.inl" />
-    <None Include="MXS_REMASTERED_patch_notes.txt">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+    <!-- The patch notes: built into the DLL (src\patch_notes.rc), not shipped next to it. -->
+    <None Include="MXS_REMASTERED_patch_notes.txt" />
+    <ResourceCompile Include="src\patch_notes.rc" />
     <None Include="MXS_REMASTERED.ini">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

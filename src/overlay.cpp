@@ -25,6 +25,7 @@
 #include "linux/third_party/stb_truetype.h"
 #endif
 #include <GL/gl.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -55,6 +56,18 @@
 #ifdef _WIN32
 #pragma comment(lib, "windowscodecs.lib")  // (the logo's PNG: WIC)
 #pragma comment(lib, "ole32.lib")
+#endif
+
+#ifndef _WIN32
+// The patch notes' file, built in (BuiltInNotes; on Windows src/patch_notes.rc has it). (The assembler takes it in, from the folder build_linux.sh builds in.)
+extern "C" __attribute__((visibility("hidden"))) const char mxcam_notes_begin[];
+extern "C" __attribute__((visibility("hidden"))) const char mxcam_notes_end[];
+asm(".pushsection .rodata\n"
+    ".global mxcam_notes_begin\n.hidden mxcam_notes_begin\nmxcam_notes_begin:\n"
+    ".incbin \"MXS_REMASTERED_patch_notes.txt\"\n"
+    ".global mxcam_notes_end\n.hidden mxcam_notes_end\nmxcam_notes_end:\n"
+    ".byte 0\n"
+    ".popsection\n");
 #endif
 
 namespace mxcam {
@@ -100,6 +113,8 @@ struct GLApi {
     decltype(&::glViewport)           Viewport;
     decltype(&::glScissor)            Scissor;
     decltype(&::glColorMask)          ColorMask;
+    decltype(&::glDepthMask)          DepthMask;
+    decltype(&::glDepthFunc)          DepthFunc;
     decltype(&::glGenTextures)        GenTextures;
     decltype(&::glDeleteTextures)     DeleteTextures;
     decltype(&::glBindTexture)        BindTexture;
@@ -161,6 +176,8 @@ bool LoadGL()
     ok = LoadFunction(g_gl.Viewport, "glViewport") && ok;
     ok = LoadFunction(g_gl.Scissor, "glScissor") && ok;
     ok = LoadFunction(g_gl.ColorMask, "glColorMask") && ok;
+    ok = LoadFunction(g_gl.DepthMask, "glDepthMask") && ok;
+    ok = LoadFunction(g_gl.DepthFunc, "glDepthFunc") && ok;
     ok = LoadFunction(g_gl.GenTextures, "glGenTextures") && ok;
     ok = LoadFunction(g_gl.DeleteTextures, "glDeleteTextures") && ok;
     ok = LoadFunction(g_gl.BindTexture, "glBindTexture") && ok;
@@ -800,6 +817,20 @@ const char* const kVertexBody =
     "    gl_Position = vec4(a_pos.x / u_screen.x * 2.0 - 1.0, 1.0 - a_pos.y / u_screen.y * 2.0, 0.0, 1.0);\n"
     "}\n";
 
+// The gamer tags': as that, with a depth of its own.
+const char* const kTagVertexBody =
+    "IN vec3 a_pos;\n"
+    "IN vec2 a_uv;\n"
+    "IN vec4 a_color;\n"
+    "OUT vec2 v_uv;\n"
+    "OUT vec4 v_color;\n"
+    "uniform vec2 u_screen;\n"
+    "void main() {\n"
+    "    v_uv = a_uv;\n"
+    "    v_color = a_color;\n"
+    "    gl_Position = vec4(a_pos.x / u_screen.x * 2.0 - 1.0, 1.0 - a_pos.y / u_screen.y * 2.0, a_pos.z, 1.0);\n"
+    "}\n";
+
 const char* const kFragmentBody =
     "IN vec2 v_uv;\n"
     "IN vec4 v_color;\n"
@@ -833,6 +864,9 @@ struct GpuResources {
     GLint  screenUniform = -1, atlasUniform = -1;
     GLuint backdrop = 0;                 // the game's picture under the menu (Config::menuOpacity)
     int    backdropW = 0, backdropH = 0;
+    bool   tagsFailed = false;           // the gamer tags' own (EnsureTagResources)
+    GLuint tagProgram = 0, tagVao = 0, tagVbo = 0;
+    GLint  tagScreen = -1, tagAtlas = -1;
 };
 GpuResources g_gpu;
 
@@ -843,10 +877,10 @@ bool Compiled(GLuint shader)
     return status != 0;
 }
 
-GLuint CompileProgram()
+GLuint CompileProgram(const char* vertexBody = kVertexBody, const char* what = "ready")
 {
     for (const ShaderDialect& dialect : kDialects) {
-        const char* vertexSource[] = { dialect.vertexHeader, kVertexBody };
+        const char* vertexSource[] = { dialect.vertexHeader, vertexBody };
         const char* fragmentSource[] = { dialect.fragmentHeader, kFragmentBody };
         const GLuint vs = g_gl.CreateShader(kVertexShader);
         const GLuint fs = g_gl.CreateShader(kFragmentShader);
@@ -874,7 +908,7 @@ GLuint CompileProgram()
         g_gl.DeleteShader(vs);  // freed together with the program
         g_gl.DeleteShader(fs);
         if (program) {
-            Log("overlay: ready (GLSL %.11s)", dialect.vertexHeader + 1);
+            Log("overlay: %s (GLSL %.11s)", what, dialect.vertexHeader + 1);
             return program;
         }
     }
@@ -1721,6 +1755,14 @@ const RowDef kRows[] = {
               "miss a gate don't count as a best (the G turns amber). Move the mouse over it: drag it to "
               "move it, drag its corner to resize it, and click the pin beside it to pin it where it is "
               "(click again to unpin)."),
+    Toggle(kTabOther, "GAMER TAGS",     "Gamer tags",                &Config::gamerTags)
+        .Help("The other riders' names over their heads, online and off. They come from the replay the game "
+              "records while you play, so the game's own Record Demo setting has to be on. Hidden behind "
+              "hills and objects like anything else. A rider's name shows once the race has loaded everyone."),
+    Slider(kTabOther, nullptr,          "Tag distance",              &Config::gamerTagDistance, 10.0,  150.0, 5.0,    1.0,  0, " m")
+        .Help("How far away riders' names still show."),
+    Slider(kTabOther, nullptr,          "Tag size",                  &Config::gamerTagSize,     0.5,   2.0,   0.05,   100.0,  0, "%")
+        .Help("How big the names are. They get smaller with distance."),
     Toggle(kTabOther, "WINDOW",         "Fullscreen window",         &Config::fullscreenWindow)
         .Help("With the game in windowed mode, makes its window cover the whole screen with no border "
               "(borderless fullscreen): Alt+Tab stays instant. Off puts the window back as it was. "
@@ -2704,6 +2746,8 @@ bool RowInactive(const RowDef& def, const Config& cfg)
     }
     if (def.option == &Config::helmetMount)
         return cfg.replayCamera != 2;
+    if (def.number == &Config::gamerTagDistance || def.number == &Config::gamerTagSize)
+        return !cfg.gamerTags;
     if (def.tab == kTabGraphics) {  // the shaders' rows: off with the master switch, or what they refine
         if (def.flag == &Config::shaders)
             return false;
@@ -2802,9 +2846,9 @@ std::string ClipboardText() { return platform::ClipboardGet(); }
 #endif
 
 // ===========================================================================
-// Patch notes (MXS_REMASTERED_patch_notes.txt, next to the DLL): every version's notes, newest first,
-// shown in the menu's box ("WHAT'S NEW" under the tabs, or the startup card's link). The file is the
-// author's own, written as posted: "# v1.4 | 2026-11-12" starts a version, "## " a section heading,
+// Patch notes (MXS_REMASTERED_patch_notes.txt, built into the DLL: nothing to ship with it): every
+// version's notes, newest first, shown in the menu's box ("WHAT'S NEW" under the tabs, or the startup
+// card's link). The file is the author's own, written as posted: "# v1.4 | 2026-11-12" starts a version, "## " a section heading,
 // "- " a bullet, any other line a headline; **text** is bold. Read once.
 // ===========================================================================
 struct NoteSpan { std::string text; bool bold = false; };
@@ -2849,27 +2893,29 @@ std::vector<NoteSpan> NoteSpans(const std::string& text)
     return spans;
 }
 
+// The file's own text, as it was when the DLL was built (src/patch_notes.rc).
+#ifdef _WIN32
+std::string BuiltInNotes()
+{
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&BuiltInNotes), &self))
+        return std::string();
+    const HRSRC found = FindResourceW(self, L"PATCH_NOTES", reinterpret_cast<LPCWSTR>(RT_RCDATA));
+    const HGLOBAL loaded = found ? LoadResource(self, found) : nullptr;
+    const void* text = loaded ? LockResource(loaded) : nullptr;
+    return text ? std::string(static_cast<const char*>(text), SizeofResource(self, found)) : std::string();
+}
+#else
+std::string BuiltInNotes() { return std::string(mxcam_notes_begin, mxcam_notes_end); }
+#endif
+
 void ReadNotes()
 {
     if (g_notesRead)
         return;
     g_notesRead = true;
-    std::string text;
-    for (const wchar_t* folder : { paths::GameFolder(), paths::DataFolder() }) {
-        if (!folder || !folder[0])
-            continue;
-        wchar_t path[MAX_PATH];
-        swprintf_s(path, L"%sMXS_REMASTERED_patch_notes.txt", folder);
-        FILE* f = nullptr;
-        if (_wfopen_s(&f, path, L"rb") != 0 || !f)
-            continue;
-        char buffer[4096];
-        size_t got;
-        while ((got = fread(buffer, 1, sizeof buffer, f)) > 0)
-            text.append(buffer, got);
-        fclose(f);
-        break;
-    }
+    std::string text = BuiltInNotes();
     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF)
         text.erase(0, 3);  // (a UTF-8 mark at its start)
     // The font holds Latin-1: a few of UTF-8's common marks as their nearest, anything else left out.
@@ -2928,7 +2974,7 @@ void ReadNotes()
         g_notes.push_back(n);
     }
     Log("panel: patch notes: %d line(s), newest %s", static_cast<int>(g_notes.size()),
-        g_notesNewest.empty() ? "(none: MXS_REMASTERED_patch_notes.txt not found)" : g_notesNewest.c_str());
+        g_notesNewest.empty() ? "(none)" : g_notesNewest.c_str());
 }
 
 // Lays one version's notes (page: 0 the newest) out cw wide from (x, y) - drawing them when draw - and
@@ -3015,7 +3061,7 @@ float LayoutNotes(int page, float x, float y, float cw, bool draw, float s, floa
     }
     if (g_notes.empty()) {
         if (draw)
-            Text(kFontLabel, x, y, "No patch notes found (MXS_REMASTERED_patch_notes.txt, next to opengl32.dll).", kDim, 0);
+            Text(kFontLabel, x, y, "No patch notes in this build.", kDim, 0);
         y += LineHeight(kFontLabel);
     }
     return y - top;
@@ -4861,6 +4907,60 @@ void DabIndicatorFrame(HWND window)
     RestoreState(saved);
 }
 
+// ---- Gamer tags (OverlayNameTags) ----------------------------------------------------------------
+struct TagVertex {
+    float    x, y, z, u, v;
+    uint32_t color;
+};
+std::vector<TagVertex> g_tagBatch;
+
+bool EnsureTagResources(float scale)
+{
+    // (The font as it is, whatever size the menu has it at: asked for at another, the whole atlas was
+    // built again twice a frame while the menu was open - 15 fps.)
+    if (g_atlasScale > 0.0f && g_gpu.context == g_gl.GetCurrentContext())
+        scale = g_atlasScale;
+    if (!EnsureResources(scale) || g_gpu.tagsFailed)
+        return false;
+    if (!g_gpu.tagProgram) {
+        g_gpu.tagProgram = CompileProgram(kTagVertexBody, "gamer tags ready");
+        if (!g_gpu.tagProgram) {
+            Log("overlay: could not compile the gamer tags' shader: no tags");
+            g_gpu.tagsFailed = true;
+            return false;
+        }
+        g_gpu.tagScreen = g_gl.GetUniformLocation(g_gpu.tagProgram, "u_screen");
+        g_gpu.tagAtlas = g_gl.GetUniformLocation(g_gpu.tagProgram, "u_atlas");
+        g_gl.GenVertexArrays(1, &g_gpu.tagVao);
+        g_gl.GenBuffers(1, &g_gpu.tagVbo);
+        g_gl.BindVertexArray(g_gpu.tagVao);
+        g_gl.BindBuffer(kArrayBuffer, g_gpu.tagVbo);
+        g_gl.VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(TagVertex), reinterpret_cast<const void*>(offsetof(TagVertex, x)));
+        g_gl.VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(TagVertex), reinterpret_cast<const void*>(offsetof(TagVertex, u)));
+        g_gl.VertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(TagVertex), reinterpret_cast<const void*>(offsetof(TagVertex, color)));
+        g_gl.EnableVertexAttribArray(0);
+        g_gl.EnableVertexAttribArray(1);
+        g_gl.EnableVertexAttribArray(2);
+    }
+    return true;
+}
+
+// (Not on whole pixels: a tag glides along with its rider.)
+float TagText(const char* text, float x, float y, float z, float k, uint32_t color)
+{
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p; ++p) {
+        const Glyph& g = g_fonts[kFontTab].glyphs[*p];
+        if (g.valid && *p != ' ') {
+            const float x0 = x + g.bearing * k, x1 = x0 + g.width * k, y1 = y + g.height * k;
+            const TagVertex a{ x0, y, z, g.u0, g.v0, color }, b{ x1, y, z, g.u1, g.v0, color };
+            const TagVertex c{ x1, y1, z, g.u1, g.v1, color }, d{ x0, y1, z, g.u0, g.v1, color };
+            g_tagBatch.insert(g_tagBatch.end(), { a, b, c, a, c, d });
+        }
+        x += g.advance * k;
+    }
+    return x;
+}
+
 // ---- The lap timer (Config::lapTimer, laptimer.h) ---------------------------------------------
 // Its panel, in the menu's own look (a dark card, a red edge down its left):
 //     LAP 3                  G 7/38      the lap; the timing gate passed, of the lap's
@@ -5220,6 +5320,108 @@ bool OverlayListeningForKey()
 }
 
 bool OverlayPanelOpen() { return g_panel.open; }
+
+void OverlayNameTags(NameTag* tags, int count, int width, int height, float dt, bool stateSaved, int depthFunc)
+{
+    if (!g_glLoaded || !g_glAvailable || count <= 0 || width <= 0 || height <= 0)
+        return;
+    const float ui = std::round(Clamp(std::fmin(height / 1080.0f, width / 1440.0f), 0.6f, 2.0f) * 20.0f) / 20.0f;  // (as the menu's)
+    SavedState saved;
+    GLboolean depthMask = GL_TRUE;
+    if (!stateSaved) {
+        SaveState(saved);
+        g_gl.GetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+    }
+    if (!EnsureTagResources(ui)) {
+        if (!stateSaved)
+            RestoreState(saved);
+        return;
+    }
+    // The nearest first: they keep their place, one behind that would cover it moves up out of the way,
+    // two lines at most - then it's left out (a full gate seen from its end).
+    std::sort(tags, tags + count, [](const NameTag& a, const NameTag& b) { return a.distance < b.distance; });
+    struct Box { float x0, y0, x1, y1; };
+    static std::vector<Box> placed;
+    placed.clear();
+    g_tagBatch.clear();
+    const float line = std::fmax(1.0f, g_fonts[kFontTab].lineHeight);
+    for (int i = 0; i < count; ++i) {
+        const NameTag& t = tags[i];
+        const float k = t.height / line;
+        const float padX = 0.36f * t.height, padY = 0.10f * t.height;
+        const float w = TextWidth(kFontTab, t.name, 0) * k + 2.0f * padX, h = t.height + 2.0f * padY, gap = 0.08f * h;
+        const float x = t.x - 0.5f * w;
+        float wanted = 0;
+        bool fits = false;
+        for (int tries = 0; tries < 3 && !fits; ++tries) {
+            fits = true;
+            const float bottom = t.y - wanted;
+            for (const Box& b : placed) {
+                if (x < b.x1 && x + w > b.x0 && bottom > b.y0 + 0.5f && bottom - h < b.y1 - 0.5f) {
+                    wanted = t.y - b.y0 + gap;  // (right over that one)
+                    fits = false;
+                    break;
+                }
+            }
+        }
+        if (!fits || wanted > 2.6f * h)
+            continue;
+        float lift = wanted;
+        if (t.lift) {
+            *t.lift += (wanted - *t.lift) * (1.0f - std::exp(-12.0f * dt));
+            lift = *t.lift;
+        }
+        const float y = t.y - lift - h;
+        placed.push_back(Box{ x, t.y - wanted - h, x + w, t.y - wanted });
+        // A see-through plate, the name on it.
+        const uint32_t plate = Rgba(58, 64, 74, 0.46f * t.alpha);
+        const float u = 4.0f / kAtlasSize;
+        const TagVertex a{ x, y, t.z, u, u, plate }, b{ x + w, y, t.z, u, u, plate };
+        const TagVertex c{ x + w, y + h, t.z, u, u, plate }, d{ x, y + h, t.z, u, u, plate };
+        g_tagBatch.insert(g_tagBatch.end(), { a, b, c, a, c, d });
+        TagText(t.name, x + padX, y + padY, t.z, k, Rgba(255, 255, 255, 0.94f * t.alpha));
+    }
+    if (!g_tagBatch.empty()) {
+        if (!depthFunc)
+            g_gl.GetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+        if (g_gl.BindFramebuffer)
+            g_gl.BindFramebuffer(kDrawFramebuffer, 0);
+        g_gl.Viewport(0, 0, width, height);
+        g_gl.Enable(GL_DEPTH_TEST);
+        g_gl.DepthFunc(GL_LEQUAL);
+        g_gl.DepthMask(GL_FALSE);
+        g_gl.Disable(GL_CULL_FACE);
+        g_gl.Disable(GL_SCISSOR_TEST);
+        g_gl.Disable(GL_STENCIL_TEST);
+        if (g_gl.BindFramebuffer)
+            g_gl.Disable(kFramebufferSrgb);
+        g_gl.Enable(GL_BLEND);
+        g_gl.BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        g_gl.BlendEquation(kFuncAdd);
+        g_gl.ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        g_gl.UseProgram(g_gpu.tagProgram);
+        g_gl.Uniform2f(g_gpu.tagScreen, static_cast<GLfloat>(width), static_cast<GLfloat>(height));
+        g_gl.Uniform1i(g_gpu.tagAtlas, 0);
+        g_gl.ActiveTexture(kTexture0);
+        g_gl.BindTexture(GL_TEXTURE_2D, g_gpu.texture);
+        if (g_gl.BindSampler)
+            g_gl.BindSampler(0, 0);
+        g_gl.BindVertexArray(g_gpu.tagVao);
+        g_gl.BindBuffer(kArrayBuffer, g_gpu.tagVbo);
+        g_gl.BufferData(kArrayBuffer, static_cast<ptrdiff_t>(g_tagBatch.size() * sizeof(TagVertex)), g_tagBatch.data(), kStreamDraw);
+        g_gl.DrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(g_tagBatch.size()));
+        g_gl.DepthFunc(static_cast<GLenum>(depthFunc));
+        static bool told = false;
+        if (!told) {
+            told = true;
+            Log("gamer tags: drawn (%d in view, %s the effects)", count, stateSaved ? "with" : "without");
+        }
+    }
+    if (!stateSaved) {
+        g_gl.DepthMask(depthMask);
+        RestoreState(saved);
+    }
+}
 
 // The game's input events as they reach it (Linux: linux/input_linux.cpp; Windows has the window
 // procedure above for the same).

@@ -378,6 +378,8 @@ int main(int argc, char** argv)
                                 : mode == "headlightrainbow" ? "Headlight=1\nHeadlightBeamDeg=22\nHeadlightColor=2"
                                                           : "Headlight=1\nHeadlightBeamDeg=22");
     }
+    else if (mode == "gamertags")
+        settings = std::string(base) + (getenv("MXCAM_TEST_TAGS_OFF") ? "[Other]\nGamerTags=0\n" : "[Other]\nGamerTags=1\n");
     else if (mode == "shadowperf" || mode == "shadowperf0" || mode == "shadowfar")  // timing: 800 objects cast shadow-map shadows
         settings = base.replace(base.find("Shadows=0"), 9, mode != "shadowperf0" ? "Shadows=1\nShadowMap=1\nShadowBatch=1"
                                                                                 : "Shadows=1\nShadowMap=1\nShadowBatch=0");
@@ -466,6 +468,16 @@ int main(int argc, char** argv)
         }
     }
 
+    if (mode == "gamertags") {
+        char temp[MAX_PATH] = "";
+        GetTempPathA(sizeof temp, temp);
+        const std::string home = std::string(temp) + "mxcam_test_home";
+        CreateDirectoryA(home.c_str(), nullptr);
+        CreateDirectoryA((home + "\\demos").c_str(), nullptr);
+        DeleteFileA((home + "\\demos\\default.mxdemo").c_str());
+        SetEnvironmentVariableA("MX_HOME", home.c_str());
+        SetEnvironmentVariableA("MXCAM_TEST_TAG_WORLD", "2048");
+    }
     // Whoever is at the desk moving the mouse mustn't count as using the game's menus.
     SetEnvironmentVariableA("MXCAM_TEST_MOUSE_IDLE", "1");
     if (tiresLate)
@@ -1016,6 +1028,7 @@ int main(int argc, char** argv)
     // riderfar: shadows on, your rider, and another 8 m behind yours: its body (skinned) is held back
     // with its bones and cast in the batch - its shadow must be there as when cast one at a time.
     const bool riderFar = mode == "riderfar";
+    const bool gamerTags = mode == "gamertags";  // riders and the game's recording of them: their names over their heads
     const float ghostAt[3] = { -3.0f, 4.8f, -24.0f };  // skyghost: the green block's middle (world)
     // rival: your bike (where its wheels sit learnt) with another bike 1 m beside it at your speed,
     // its wheels spinning too; after 1.5 s your rear wheel isn't drawn (as in first person). Your
@@ -1030,7 +1043,7 @@ int main(int argc, char** argv)
     const bool waterSpray = mode == "waterspray";
     const bool roostRun = mode == "roost" || snowRoll || waterSpray;
     const bool hideHud = mode == "hidehud";
-    int frames = roostRun ? 2000 : rivalStep ? 700 : rivalRoost ? 320 : timing ? 160 : gateBox || wheelDrift || rival || riderFar ? 260 : hiddenWheels || rearHidden ? 200 : hideHud ? 330 : headShadow ? 40 : stadiumSwap ? 40 : 12;
+    int frames = gamerTags ? 100000 : roostRun ? 2000 : rivalStep ? 700 : rivalRoost ? 320 : timing ? 160 : gateBox || wheelDrift || rival || riderFar ? 260 : hiddenWheels || rearHidden ? 200 : hideHud ? 330 : headShadow ? 40 : stadiumSwap ? 40 : 12;
     // hidehud: the game's menu over the race, a draw of its own (another texture) right of the HUD.
     // Esc opens it (frames 100-199), Esc closes it; then it's opened and closed without Esc (frames
     // 230-299: a click in it). The HUD and the menu are sampled on the frames below. At frame 315 the
@@ -1054,6 +1067,12 @@ int main(int argc, char** argv)
             LARGE_INTEGER count;
             QueryPerformanceCounter(&count);
             if (double(count.QuadPart - runStart.QuadPart) / double(frequency.QuadPart) > 1.3)
+                frames = frameIndex + 1;
+        }
+        if (gamerTags) {
+            LARGE_INTEGER count;
+            QueryPerformanceCounter(&count);
+            if (double(count.QuadPart - runStart.QuadPart) / double(frequency.QuadPart) > (getenv("MXCAM_TEST_TAGS_SECONDS") ? atof(getenv("MXCAM_TEST_TAGS_SECONDS")) : 3.0))
                 frames = frameIndex + 1;
         }
         if (stadiumSwap && frameIndex == 10) {  // another track: the box's arrays and buffers go, the roof comes
@@ -1124,6 +1143,71 @@ int main(int argc, char** argv)
         if (headShadow && rider) {
             const float facing[9] = { 1, 0, 0,  0, 1, 0,  0, 0, 1 };
             Rider(facing, 0.0f, 0.565f, -0.2f, 1.0f, bodyShadow && frameIndex < 15);
+        }
+
+        // gamertags: you (no tag), three riders in sight and one behind a wall (no tag either), as the game
+        // draws them; and the game's recording of them, written along as it does.
+        if (gamerTags && rider) {
+            constexpr float u = 3.2808f;
+            constexpr double world = 2048.0;
+            struct R { float x, z, speed; const char* name; const char* number; };
+            static std::vector<R> all = { { 0.0f, -7.0f * u, 0.0f, "Me", "7" }, { -16.0f, -11.0f * u, 1.0f, "Alpha | Team", "111" },
+                                      { -60.0f, -26.0f * u, 3.0f, "Bravo", "22" }, { -4.0f, -38.0f * u, -2.0f, "Jos\xC3\xA9", "3" },
+                                      { 30.0f, -30.0f * u, 0.0f, "Hidden", "404" } };
+            static const bool gate = getenv("MXCAM_TEST_TAGS_GATE") != nullptr;  // (the cost: 40 riders more, side by side)
+            static char gateNames[40][32];
+            if (gate && all.size() == 5)
+                for (int k = 0; k < 40; ++k) {
+                    snprintf(gateNames[k], sizeof gateNames[k], "Rider Number %d | Team", k);
+                    all.push_back(R{ -80.0f + 4.0f * k, -45.0f * u, 0.0f, gateNames[k], "1" });
+                }
+            LARGE_INTEGER count;
+            QueryPerformanceCounter(&count);
+            const double elapsed = double(count.QuadPart - runStart.QuadPart) / double(frequency.QuadPart);
+            static FILE* record = nullptr;
+            static unsigned previous = 0, ticked = 0;
+            if (!record) {
+                char home[MAX_PATH] = "";
+                GetEnvironmentVariableA("MX_HOME", home, sizeof home);
+                record = _fsopen((std::string(home) + "\\demos\\default.mxdemo").c_str(), "wb", _SH_DENYNO);
+                if (record) {
+                    fprintf(record, "MX06 %d 61440 1 1720\nTestTrack\n", static_cast<int>(all.size()));
+                    for (const R& r : all)
+                        fprintf(record, "fc450(2017)|a.png|b.png|c.png|d.png\n%s\n%s\n\n", r.number, r.name);
+                }
+            }
+            while (record && (ticked + 1) * 4 <= elapsed * 128.0 + 4) {
+                const unsigned tick = ticked++ * 4, length = 44 * (tick ? static_cast<unsigned>(all.size()) : 1u), coded = length ^ previous;
+                previous = length;
+                fwrite(&coded, 4, 1, record);
+                fwrite(&tick, 4, 1, record);
+                fputc(1, record);
+                for (int k = 0; k < (tick ? static_cast<int>(all.size()) : 1); ++k) {
+                    unsigned char state[44] = {};
+                    state[0] = static_cast<unsigned char>(k);
+                    memcpy(state + 1, &tick, 4);
+                    const double at[3] = { all[k].x + all[k].speed * tick / 128.0, -512.0, all[k].z };
+                    for (int c = 0; c < 3; ++c) {
+                        const unsigned v = static_cast<unsigned>((at[c] + world / 2) / world * 16777216.0);
+                        memcpy(state + 5 + 3 * c, &v, 3);
+                    }
+                    fwrite(state, 44, 1, record);
+                }
+                fflush(record);
+            }
+            const float facing[9] = { 1, 0, 0,  0, 1, 0,  0, 0, 1 };
+            for (const R& r : all)
+                Rider(facing, r.x + r.speed * static_cast<float>(elapsed), 0.9f * u, r.z, u);
+            gl.UseProgram(object);
+            gl.UniformMatrix4fv(oProj, 1, GL_FALSE, projection);
+            const float wall[16] = { 26.0f, 0, 0, 0,  0, 26.0f, 0, 0,  0, 0, 2.0f, 0,  21.0f, 4.0f, -20.0f * u, 1 };
+            float wallView[16];
+            Mul(view, wall, wallView);
+            gl.UniformMatrix4fv(oMv, 1, GL_FALSE, wallView);
+            const float brick[3] = { 0.5f, 0.2f, 0.15f };
+            gl.Uniform3fv(oColor, 1, brick);
+            gl.BindVertexArray(arrays[1]);
+            p_glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
         }
 
         // Third person: your rider a few metres ahead of the camera, riding away from it.
@@ -1775,7 +1859,7 @@ int main(int argc, char** argv)
             p_glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, rgbBefore.data());
         }
         const bool captureFrame =
-            frameIndex == (hideHud || headShadow || rival || stadiumSwap || roostRun || riderFar || (rearHidden && !gateBox) ? frames - 1 : 11);
+            frameIndex == (gamerTags || hideHud || headShadow || rival || stadiumSwap || roostRun || riderFar || (rearHidden && !gateBox) ? frames - 1 : 11);
         if (captureFrame) {
             p_glFinish();
             p_glReadBuffer(GL_BACK);
@@ -2870,6 +2954,24 @@ int main(int argc, char** argv)
         Check(bonesNow == lastBones && std::fabs(bone0[0] - lastBone0[0]) + std::fabs(bone0[1] - lastBone0[1]) +
                   std::fabs(bone0[2] - lastBone0[2]) < 1e-4f,
               "the rider program's bones are the game's again");
+    } else if (mode == "gamertags") {
+        // Plates with white text: in sight over the three riders' heads; none over yours, none on or past the wall.
+        int white = 0, onWall = 0;
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                const Pixel p = At(x, y);
+                const bool text = p.r > 200 && p.g > 200 && p.b > 200;
+                const bool hud = x > W / 2 - 170 && x < W / 2 + 60 && y > 100 && y < 160 && !(x > W / 2 - 110 && x < W / 2 - 30);
+                if (hud)
+                    continue;
+                white += text ? 1 : 0;
+                onWall += text && x > W * 2 / 3 ? 1 : 0;
+            }
+        }
+        printf("    gamer tags: %d white pixels, %d on the wall's side\n", white, onWall);
+        const bool off = getenv("MXCAM_TEST_TAGS_OFF") != nullptr;
+        Check(off ? white < 20 : white > 60, "the riders in sight have their names over them");
+        Check(onWall == 0, "nothing shows through the wall");
     } else if (mode == "thirdperson") {
         // The light starts at the rider's bike, not at the camera behind it.
         // (The bike is turned 30 degrees to the right, so its beam is right of the middle.)

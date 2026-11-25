@@ -416,6 +416,9 @@ std::vector<TunableValue> Tunables(const Config& c)
         { L"Other",     L"HideCursor",           c.hideCursor ? 1.0 : 0.0 },
         { L"Other",     L"DabIndicator",         c.dabIndicator ? 1.0 : 0.0 },
         { L"Other",     L"LapTimer",             c.lapTimer ? 1.0 : 0.0 },
+        { L"Other",     L"GamerTags",            c.gamerTags ? 1.0 : 0.0 },
+        { L"Other",     L"GamerTagDistance",     c.gamerTagDistance },
+        { L"Other",     L"GamerTagSize",         c.gamerTagSize },
         { L"Other",     L"BrakeSqueal",          c.brakeSqueal },
         { L"Other",     L"DirtSlide",            c.dirtSlide },
         { L"Other",     L"DabSticky",            static_cast<double>(c.dabSticky) },
@@ -642,6 +645,9 @@ void CopyTunables(const Config& from, Config& to)
     to.hideCursor           = from.hideCursor;
     to.dabIndicator         = from.dabIndicator;
     to.lapTimer             = from.lapTimer;
+    to.gamerTags            = from.gamerTags;
+    to.gamerTagDistance     = from.gamerTagDistance;
+    to.gamerTagSize         = from.gamerTagSize;
     to.brakeSqueal          = from.brakeSqueal;
     to.dirtSlide            = from.dirtSlide;
     to.dabSticky            = from.dabSticky;
@@ -995,6 +1001,9 @@ Config ParseConfig(const Config& base)
     c.hideCursor       = ReadInt(L"Other", L"HideCursor", c.hideCursor) != 0;
     c.dabIndicator     = ReadInt(L"Other", L"DabIndicator", c.dabIndicator) != 0;
     c.lapTimer         = ReadInt(L"Other", L"LapTimer", c.lapTimer) != 0;
+    c.gamerTags        = ReadInt(L"Other", L"GamerTags", c.gamerTags) != 0;
+    c.gamerTagDistance = Clamp(ReadDouble(L"Other", L"GamerTagDistance", c.gamerTagDistance), 10.0, 150.0);
+    c.gamerTagSize     = Clamp(ReadDouble(L"Other", L"GamerTagSize", c.gamerTagSize), 0.5, 2.0);
     // (A debug view, kept out of the presets and never written: [Debug] ShadowView=1..4, see Config.)
     c.shadowView       = Clamp(static_cast<int>(GetPrivateProfileIntW(L"Debug", L"ShadowView", 0, g_path)), 0, 4);
     c.seeThroughDepth  = Clamp(static_cast<int>(GetPrivateProfileIntW(L"Debug", L"SeeThroughDepth", 1, g_path)), 0, 2);

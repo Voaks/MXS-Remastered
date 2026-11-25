@@ -16,7 +16,7 @@ mkdir -p "$out" "$obj"
 
 sources=(
     camera replay terrain bike lobby_wheels timeofday log config postfx proc_hooks texfilter hooks
-    overlay gamepad dab brake thunder sound_packs setups gamelog laptimer
+    overlay gamepad dab brake thunder sound_packs setups gamelog laptimer gamertags
     linux/win32_compat linux/input_linux linux/paths_linux linux/fonts_linux linux/stb_impl linux/entry_linux
 )
 flags=(-std=c++17 -O2 -fPIC -fvisibility=hidden -Isrc/linux/include -Wall -Wno-unused-function -Wno-missing-braces)

@@ -1,0 +1,2 @@
+// The patch notes, built into the DLL (overlay.cpp, ReadNotes): MXS_REMASTERED_patch_notes.txt as it is.
+PATCH_NOTES RCDATA "../MXS_REMASTERED_patch_notes.txt"

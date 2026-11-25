@@ -62,6 +62,7 @@
 #include "gamepad.h"
 #include "hooks.h"
 #include "laptimer.h"
+#include "gamertags.h"
 #include "lobby_wheels.h"
 #include "log.h"
 #include "overlay.h"
@@ -1578,7 +1579,7 @@ void PrepareSkinnedDraw()
         replay::ObserveSkeleton(skin->centre, skin->position, skin->rotation, skin->transposed, bones);
     if (complete)  // your rider (the headlight) and your bike's wheels (tire marks, tire dirt)
         postfx::NoteSkeleton(g_program, skin->centre, skin->position, skin->rotation, skin->transposed, bones,
-                             skin->rawView);
+                             skin->rawView, g_boundTextures[0]);
 
     const Config& cfg = GetConfig();
     bool hidden[kMaxBones] = {};
@@ -1871,6 +1872,8 @@ void NoteTerrainUniform(GLint location, GLsizei count, const GLfloat* value, int
             terrain::SetGridUnit(g_heightmapUpload[0][0]);
             if (g_heightmapUpload[0][0] > 0 && g_heightmapUpload[1][0] > 0)
                 terrain::SetMapSize(g_heightmapUpload[0][0] / g_heightmapUpload[1][0]);
+            if (g_heightmapUpload[0][0] > 0 && g_heightmapUpload[1][0] > 0)
+                gamertags::SetWorldSize(g_heightmapUpload[0][0] / g_heightmapUpload[1][0]);
         }
         return;
     }
@@ -2929,6 +2932,7 @@ void StartTrace(double seconds)
     wchar_t path[1024];
     swprintf_s(path, L"%sMXS_REMASTERED_trace.csv", LogDirectory());
     postfx::RequestMarksDump();  // (and a picture of the tire marks map around you)
+    gamertags::Report();         // (and who the gamer tags took each rider for)
     g_trace = _wfsopen(path, L"w", _SH_DENYWR);
     if (!g_trace) {
         Log("trace: could not create %ls", path);
