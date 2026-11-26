@@ -242,6 +242,8 @@ uniform float u_shadowSoft;     // 0..1: how soft detailed shadows' edges are (C
 uniform float u_shadowGround;   // 1: ground turned from the sun shaded (Config::shadowGround)
 uniform float u_groundBright;   // 1..3: the ground alone brighter (Config::groundBrightness)
 uniform float u_dirtColor;      // 0..2: how strong the dirt's colour is, 1 as the track has it (Config::dirtColor)
+uniform vec3  u_dirtShade;      // the dirt's new colour (linear, luma 1) (Config::dirtShade)
+uniform float u_dirtShadeLight; // and how bright, next to the track's own dirt; 0: as the track has it
 uniform vec3  u_dirtLight;      // takes the colour of the track's light out of the ground's (1 1 1: white light)
 uniform float u_shadowCast;     // 0: nothing cast into the map (bikes and objects both off): not looked up
 uniform vec3  u_lightView;      // toward the light, view space
@@ -1364,11 +1366,21 @@ void main()
             // 0.43; by the pictures and the tracks' own textures). Under the snow and the rain.
             float sand = 0.0;  // (how much this is sand: for the ground brightness below)
             float yellow = 0.0, reddish = 0.0;
-            if ((u_dirtColor != 1.0 || u_groundBright > 1.0) && ground > 0.0) {
+            if ((u_dirtColor != 1.0 || u_groundBright > 1.0 || u_dirtShadeLight > 0.0) && ground > 0.0) {
                 vec3 own = c * u_dirtLight;
                 yellow = (own.g - own.b) / max(own.r - own.b, 1e-4);
                 reddish = smoothstep(0.02, 0.18, (own.r - own.g) / max(own.r, 1e-4));
                 sand = reddish * smoothstep(0.42, 0.52, yellow);
+            }
+            // Dirt shade: the dirt another colour (rich brown, red clay), as bright as it was (times the shade's
+            // own brightness) and in the track's light. Only the dirt, the same as the dirt colour below (not
+            // sand, not grass); never brighter than its brightest colour was or 1, so it doesn't clip.
+            if (u_dirtShadeLight > 0.0 && ground > 0.0) {
+                float dirt = ground * reddish * (1.0 - smoothstep(0.43, 0.49, yellow));
+                vec3 shade = u_dirtShade / u_dirtLight;
+                shade *= Luma(c) * u_dirtShadeLight / max(Luma(shade), 1e-5);
+                shade *= min(1.0, max(max(c.r, max(c.g, c.b)), 1.0) / max(shade.r, max(shade.g, shade.b)));
+                c = mix(c, shade, dirt);
             }
             if (u_dirtColor != 1.0 && ground > 0.0) {
                 float dirt = reddish * (1.0 - smoothstep(0.43, 0.49, yellow));

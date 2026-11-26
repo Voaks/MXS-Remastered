@@ -131,6 +131,7 @@ struct Config {
     bool   shadowObjects    = true;       // detailed shadows: everything else solid casts them (track objects, trees, stands)
     double groundBrightness = 1.0;        // 1..3: the ground alone brighter, its dark places (berms in shade) the most
     double dirtColor = 1.0;               // 0..2: how strong the dirt's own colour is (1 as the track has it; grass left alone)
+    int    dirtShade = 0;                 // the dirt's colour: 0 as the track has it, 1 rich brown, 2 red clay (sand and grass left alone)
     bool   shadowGround     = true;       // detailed shadows: the ground turned away from the sun is shaded (berm faces, slopes)
     double shadowSoftness   = 0.5;        // 0..1 detailed shadows' edges: 0 crisp, 1 soft (and the steps a
                                           // low sun leaves on a berm's face smoothed the most)

@@ -1578,6 +1578,10 @@ const RowDef kRows[] = {
     Slider(kTabGraphics, nullptr,           "Dirt color",           &Config::dirtColor,        0.0,   2.0,   0.05,   100.0,  0, "%", nullptr)
         .Help("How strong the dirt's color is. 100% is how the track has it; higher is richer and browner, "
               "lower is grayer. Only the dirt: sand, grass, snow, bikes, riders, objects and the sky stay as they are."),
+    Choice3(kTabGraphics, nullptr,          "Dirt shade",           &Config::dirtShade,        "DEFAULT", "BROWN", "RED CLAY")
+        .Help("The dirt's color. DEFAULT is how the track has it; BROWN is a rich dark brown, RED CLAY a red "
+              "clay track. Each keeps the dirt's own light and shade. Only the dirt: sand, grass, snow, bikes, "
+              "riders, objects and the sky stay as they are. No cost either way."),
     Choice3(kTabGraphics, nullptr,          "Shadow resolution",    &Config::shadowResolution, "2048", "4096", "8192")
         .Help("Detailed shadows: how sharp they are, near and far. Higher is sharper, at the cost of "
               "graphics memory and speed (8192 is for high-end graphics cards)."),

@@ -1315,6 +1315,8 @@ timeofday::Sky CurrentSky()
 
 // The dirt's colour changed (the slider's 100%, give or take its own rounding: not).
 bool DirtColorOn(const Config& cfg) { return std::fabs(cfg.dirtColor - 1.0) > 0.005; }
+// The dirt recoloured at all: its colour's strength or its shade (Config::dirtColor, dirtShade).
+bool DirtRecolorOn(const Config& cfg) { return DirtColorOn(cfg) || cfg.dirtShade != 0; }
 float g_dirtLight[3] = { 1.0f, 1.0f, 1.0f };  // takes the light's colour out of the ground's (NoteGroundLightColor)
 
 // What lights the scene: the game's sun, or ours when the time of day turns it.
@@ -6846,6 +6848,21 @@ void Render(int w, int h)
         Bind(p, "u_shadowMap", 5, g_res.shadowMap);
         g_gl.Uniform1f(p["u_groundBright"], static_cast<float>(cfg.groundBrightness));
         g_gl.Uniform1f(p["u_dirtColor"], DirtColorOn(cfg) ? static_cast<float>(cfg.dirtColor) : 1.0f);
+        {
+            // Dirt shade: its colour (from the pictures it was chosen by, sRGB) in linear, luma 1, and how
+            // bright it is next to the track's own dirt.
+            static const float kShades[3][4] = { { 0, 0, 0, 0 }, { 100, 56, 38, 0.5f }, { 214, 126, 90, 1.35f } };
+            const float* s = kShades[cfg.dirtShade < 0 || cfg.dirtShade > 2 ? 0 : cfg.dirtShade];
+            float lin[3] = {};
+            for (int k = 0; k < 3; ++k) {
+                const float v = s[k] / 255.0f;
+                lin[k] = v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+            }
+            const float luma = 0.2126f * lin[0] + 0.7152f * lin[1] + 0.0722f * lin[2];
+            const float inv = luma > 0.0f ? 1.0f / luma : 0.0f;
+            g_gl.Uniform3f(p["u_dirtShade"], lin[0] * inv, lin[1] * inv, lin[2] * inv);
+            g_gl.Uniform1f(p["u_dirtShadeLight"], luma > 0.0f ? s[3] : 0.0f);
+        }
         g_gl.Uniform3f(p["u_dirtLight"], g_dirtLight[0], g_dirtLight[1], g_dirtLight[2]);
         g_gl.Uniform1f(p["u_shadowMapOn"], shadowMapOn ? 1.0f : 0.0f);
         g_gl.Uniform1f(p["u_shadowView"], static_cast<float>(cfg.shadowView));
@@ -8159,7 +8176,7 @@ void NoteGroundLightColor(const double rgb[3])
 bool WantsGroundLightColor()
 {
     const Config& cfg = GetConfig();
-    return cfg.shaders && (DirtColorOn(cfg) || cfg.groundBrightness > 1.0);
+    return cfg.shaders && (DirtRecolorOn(cfg) || cfg.groundBrightness > 1.0);
 }
 
 bool FrameRenderedView(double rendered[16], double up[3])
@@ -8628,7 +8645,7 @@ void TerrainPassDone()
 {
     g_frame.terrainDone = true;
     const Config& cfg = GetConfig();
-    if (!cfg.shaders || (cfg.dirtDetail <= 0.0 && cfg.tireMarks <= 0.0 && TireCoat(cfg) <= 0.0 && cfg.weather == kWeatherNone && !RoostOn(cfg) && cfg.groundBrightness <= 1.0 && !DirtColorOn(cfg)) || !g_frame.haveView || g_frame.terrainSnapshot || g_frame.applied ||
+    if (!cfg.shaders || (cfg.dirtDetail <= 0.0 && cfg.tireMarks <= 0.0 && TireCoat(cfg) <= 0.0 && cfg.weather == kWeatherNone && !RoostOn(cfg) && cfg.groundBrightness <= 1.0 && !DirtRecolorOn(cfg)) || !g_frame.haveView || g_frame.terrainSnapshot || g_frame.applied ||
         g_res.failed || !LoadGL())
         return;
     GLint drawFb = 0;
